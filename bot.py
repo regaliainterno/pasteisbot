@@ -30,8 +30,7 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
-# ... (As funções get_drive_service, get_file_id, download_dataframe, upload_dataframe permanecem as mesmas)
+# --- FUNÇÕES DO GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
@@ -111,7 +110,6 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
 
 # --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
-    # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
     df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
@@ -174,10 +172,7 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
-# ... (Funções start, registrar_usuario, definir_estoque, etc., permanecem as mesmas)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     user_name = update.effective_user.first_name
     help_text = (
         f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas.\n\n"
@@ -210,7 +205,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     chat_id = update.effective_chat.id
     await update.message.reply_text(
         f"✅ Chat registrado.\n\n"
@@ -308,87 +302,72 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
 
-# ----- FUNÇÃO ATUALIZADA PARA DEPURAÇÃO -----
 async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
-        # 1. Validação do número de argumentos
-        if len(context.args) != 2:
-            await update.message.reply_text(
-                f"🐛 Erro de Depuração: Eu esperava 2 argumentos, mas recebi {len(context.args)}.")
-            return
-
+        if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
-
-        # 2. Validação da quantidade (se é um número)
-        try:
-            quantidade_consumo = int(context.args[1])
-        except ValueError:
-            await update.message.reply_text(f"🐛 Erro de Depuração: A quantidade '{context.args[1]}' não é um número.")
-            return
-
-        # 3. Validação do sabor (se está na lista)
+        quantidade_consumo = int(context.args[1])
         if sabor not in SABORES_VALIDOS:
             await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
             return
-
-        # --- Lógica principal (sem alterações) ---
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         service = get_drive_service()
-
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
         df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
-
         if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use `/estoque`.")
+            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
             return
-
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
-
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
-
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
         df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
         vendas_hoje_sabor = df_vendas[
             (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
         ja_vendido = vendas_hoje_sabor['quantidade'].sum()
-
         consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
         colunas_consumo = ['data_hora', 'sabor', 'quantidade', 'custo_total']
         df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, colunas_consumo)
         consumo_hoje_sabor = df_consumo[
             (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
-
         estoque_atual = estoque_inicial - ja_vendido - ja_consumido
-
         if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Consumo não registrado! Estoque insuficiente.\n"
-                                            f"**Estoque atual de {sabor.capitalize()}:** {int(estoque_atual)} unidades.")
+            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
             return
-
         novo_consumo = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
               'custo_total': quantidade_consumo * PRECO_FIXO_CUSTO}])
         df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
         upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
-
         await update.message.reply_text(
-            f'✅ Consumo pessoal registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
-
+            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
+    except (ValueError, IndexError):
+        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
     except Exception as e:
         print(
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(
-            f"🐛 Erro inesperado no servidor. Por favor, mostre esta mensagem ao desenvolvedor:\n\n`Tipo do Erro: {type(e).__name__}`\n`Detalhes: {e}`")
+        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
+
+
+async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if context.args:
+            data_filtro = pd.to_datetime(context.args[0]).date()
+        else:
+            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
+        texto = gerar_texto_relatorio_diario(data_filtro)
+        await update.message.reply_text(texto, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         service = get_drive_service()
@@ -420,7 +399,6 @@ async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         plt.style.use('seaborn-v0_8-whitegrid')
         if not context.args or not context.args[0].isdigit():
@@ -479,7 +457,6 @@ async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         if not context.args or not context.args[0].isdigit():
             await update.message.reply_text("❌ Erro! Use o formato: `/lucro [dias]`\nExemplo: `/lucro 7`")
@@ -510,7 +487,6 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         await update.message.reply_text("Buscando o arquivo de vendas no Drive...")
         service = get_drive_service()
@@ -532,6 +508,7 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def post_init(application: Application) -> None:
+    """Função para iniciar o agendador após o bot ligar."""
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(enviar_relatorio_automatico, 'cron', hour=19, minute=30, args=[application])
     scheduler.start()
@@ -539,6 +516,7 @@ async def post_init(application: Application) -> None:
 
 
 def main() -> None:
+    """Inicia o bot e registra os handlers e o agendador de tarefas."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
@@ -549,7 +527,7 @@ def main() -> None:
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario))  # Alterado para o novo handler
+    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
