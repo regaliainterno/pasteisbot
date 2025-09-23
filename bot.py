@@ -9,7 +9,7 @@ import io
 import traceback
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-from apscheduler import AsyncScheduler  # LINHA CORRIGIDA
+from apscheduler.schedulers.asyncio import AsyncIOScheduler  # LINHA CORRIGIDA
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -110,6 +110,7 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
 
 # --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
+    # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
     df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
@@ -171,7 +172,8 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=texto_relatorio, parse_mode='Markdown')
 
 
-# --- DEFINIÇÃO DOS COMANDOS ---
+# --- DEFINIÇÃO DOS COMANDOS (sem alterações) ---
+# ... (As funções start, registrar_usuario, definir_estoque, etc., permanecem as mesmas)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     help_text = (
@@ -204,7 +206,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-# ... (todas as outras funções de comando como registrar_usuario, definir_estoque, etc., permanecem as mesmas)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
@@ -506,18 +507,22 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def post_init(application: Application) -> None:
-    scheduler = AsyncScheduler(timezone=TIMEZONE)
+    """Função para iniciar o agendador após o bot ligar."""
+    # ----- CORREÇÃO APLICADA AQUI -----
+    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(enviar_relatorio_automatico, 'cron', hour=19, minute=30, args=[application])
     scheduler.start()
     print("Agendador de tarefas iniciado e configurado para 19:30.")
 
 
 def main() -> None:
+    """Inicia o bot e registra os handlers e o agendador de tarefas."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
+    # Registra todos os comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("registrar", registrar_usuario))
     application.add_handler(CommandHandler("estoque", definir_estoque))
