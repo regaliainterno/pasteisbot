@@ -30,7 +30,7 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
+# --- FUNÇÕES DO GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
@@ -51,20 +51,16 @@ def get_drive_service():
                 google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
                 if google_token_base_64 and google_creds_json:
                     try:
-                        # Decodifica o token
                         decoded_token = base64.b64decode(google_token_base_64)
                         creds = pickle.loads(decoded_token)
-                        # Se o token estiver expirado, tenta usar o refresh token
                         if not creds.valid and creds.refresh_token:
                             creds_info = json.loads(google_creds_json)
-                            # Para refresh, precisamos do client_id e client_secret do JSON
                             creds.refresh(Request(creds_info.get('installed')))
                     except Exception as e:
                         print(f"Erro ao processar credenciais do Google: {e}")
                         raise ValueError(f"Erro ao processar credenciais: {e}")
                 else:
                     raise ValueError("Token ou credenciais não encontrados.")
-        # Salva o token atualizado localmente, se possível
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
     return build('drive', 'v3', credentials=creds)
@@ -120,28 +116,7 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- DEFINIÇÃO DOS COMANDOS ---
-
-# ----- NOVO COMANDO DE DEPURAÇÃO -----
-async def debug_vars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Verifica o status das variáveis de ambiente no servidor."""
-    creds_json_val = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    token_b64_val = os.environ.get("GOOGLE_TOKEN_BASE_64")
-
-    message = "--- Status das Variáveis de Ambiente no Servidor ---\n\n"
-    message += f"GOOGLE_CREDENTIALS_JSON:\n"
-    message += f"  - Definida: {'Sim' if creds_json_val else 'NÃO'}\n"
-    message += f"  - Tamanho: {len(creds_json_val) if creds_json_val else 0} caracteres\n\n"
-
-    message += f"GOOGLE_TOKEN_BASE_64:\n"
-    message += f"  - Definida: {'Sim' if token_b64_val else 'NÃO'}\n"
-    message += f"  - Tamanho: {len(token_b64_val) if token_b64_val else 0} caracteres"
-
-    # Usamos o modo HTML com a tag <pre> para manter a formatação
-    await update.message.reply_text(f"<pre>{message}</pre>", parse_mode='HTML')
-
-
-# ... (O restante do código, com todas as outras funções, permanece o mesmo)
+# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -204,6 +179,7 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=texto_relatorio, parse_mode='Markdown')
 
 
+# --- DEFINIÇÃO DOS COMANDOS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     help_text = (
@@ -335,9 +311,16 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        if len(context.args) != 2: raise ValueError("Formato incorreto")
+        if len(context.args) != 2:
+            await update.message.reply_text(
+                f"🐛 Erro de Depuração: Eu esperava 2 argumentos, mas recebi {len(context.args)}.")
+            return
         sabor = context.args[0].lower()
-        quantidade_consumo = int(context.args[1])
+        try:
+            quantidade_consumo = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text(f"🐛 Erro de Depuração: A quantidade '{context.args[1]}' não é um número.")
+            return
         if sabor not in SABORES_VALIDOS:
             await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
             return
@@ -348,11 +331,11 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
         if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
+            await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use `/estoque`.")
             return
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -368,7 +351,8 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
         estoque_atual = estoque_inicial - ja_vendido - ja_consumido
         if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Consumo não registrado! Estoque insuficiente: *{int(estoque_atual)}*.",
+                                            parse_mode='Markdown')
             return
         novo_consumo = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
@@ -376,13 +360,24 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
         upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
         await update.message.reply_text(
-            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
-    except (ValueError, IndexError):
-        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
+            f'✅ Consumo pessoal registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
     except Exception as e:
         print(
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
+        await update.message.reply_text(
+            f"🐛 Ocorreu um erro inesperado no servidor. Por favor, mostre esta mensagem ao desenvolvedor:\n\n`Tipo do Erro: {type(e).__name__}`\n`Detalhes: {e}`")
+
+
+async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if context.args:
+            data_filtro = pd.to_datetime(context.args[0]).date()
+        else:
+            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
+        texto = gerar_texto_relatorio_diario(data_filtro)
+        await update.message.reply_text(texto, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -543,13 +538,13 @@ def main() -> None:
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario))  # CORREÇÃO APLICADA AQUI
+    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
 
-    print("Bot v12 COM DEBUG NO CONSUMO e CORREÇÃO DE HANDLER iniciado...")
+    print("Bot Final (v12) iniciado e escutando...")
     application.run_polling()
 
 
