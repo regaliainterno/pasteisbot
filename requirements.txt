@@ -2,3 +2,5 @@ python-telegram-bot
 google-api-python-client
 google-auth-oauthlib
 pandas
+matplotlib
+apscheduler
