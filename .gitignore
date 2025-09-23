@@ -1,0 +1,11 @@
+# Arquivos de segredo e autenticação
+credentials.json
+token.pickle
+
+# Arquivos e pastas do Python
+__pycache__/
+*.pyc
+
+# Pasta de ambiente virtual
+.venv/
+venv/
