@@ -9,7 +9,7 @@ import io
 import traceback
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-from apscheduler.schedulers.asyncio import AsyncScheduler
+from apscheduler import AsyncScheduler  # LINHA CORRIGIDA
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -30,12 +30,12 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE ---
+# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():
-    creds = None
+    creds = None;
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
@@ -47,7 +47,7 @@ def get_drive_service():
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                 creds = flow.run_local_server(port=0)
             else:
-                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE64')
+                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
                 if google_token_base_64:
                     decoded_token = base64.b64decode(google_token_base_64)
                     creds = pickle.loads(decoded_token)
@@ -59,7 +59,7 @@ def get_drive_service():
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false"
+    query = f"name='{file_name}' and trashed=false";
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
@@ -108,6 +108,7 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
+# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -171,8 +172,6 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
-
-# ----- FUNÇÃO ATUALIZADA -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     help_text = (
@@ -205,6 +204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
+# ... (todas as outras funções de comando como registrar_usuario, definir_estoque, etc., permanecem as mesmas)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
@@ -272,8 +272,8 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
         ja_vendido = vendas_hoje_sabor['quantidade'].sum()
         consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
-                                        ['data_hora', 'sabor', 'quantidade', 'custo_total'])
+        colunas_consumo = ['data_hora', 'sabor', 'quantidade', 'custo_total']
+        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, colunas_consumo)
         consumo_hoje_sabor = df_consumo[
             (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
@@ -299,6 +299,70 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         print(
             f"--- ERRO INESPERADO EM registrar_venda ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
+
+
+async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if len(context.args) != 2: raise ValueError("Formato incorreto")
+        sabor = context.args[0].lower()
+        quantidade_consumo = int(context.args[1])
+        if sabor not in SABORES_VALIDOS:
+            await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
+            return
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        service = get_drive_service()
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
+                                        ['data', 'sabor', 'quantidade_inicial'])
+        estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
+        if estoque_hoje.empty:
+            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
+            return
+        estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
+        if estoque_sabor.empty:
+            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            return
+        estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
+        vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
+        df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
+        vendas_hoje_sabor = df_vendas[
+            (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
+        ja_vendido = vendas_hoje_sabor['quantidade'].sum()
+        consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
+        colunas_consumo = ['data_hora', 'sabor', 'quantidade', 'custo_total']
+        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, colunas_consumo)
+        consumo_hoje_sabor = df_consumo[
+            (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
+        ja_consumido = consumo_hoje_sabor['quantidade'].sum()
+        estoque_atual = estoque_inicial - ja_vendido - ja_consumido
+        if quantidade_consumo > estoque_atual:
+            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
+            return
+        novo_consumo = pd.DataFrame(
+            [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
+              'custo_total': quantidade_consumo * PRECO_FIXO_CUSTO}])
+        df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
+        upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
+        await update.message.reply_text(
+            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
+    except (ValueError, IndexError):
+        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
+    except Exception as e:
+        print(
+            f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
+        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
+
+
+async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if context.args:
+            data_filtro = pd.to_datetime(context.args[0]).date()
+        else:
+            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
+        texto = gerar_texto_relatorio_diario(data_filtro)
+        await update.message.reply_text(texto, parse_mode='Markdown')
+    except Exception as e:
+        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -442,7 +506,7 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def post_init(application: Application) -> None:
-    scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+    scheduler = AsyncScheduler(timezone=TIMEZONE)
     scheduler.add_job(enviar_relatorio_automatico, 'cron', hour=19, minute=30, args=[application])
     scheduler.start()
     print("Agendador de tarefas iniciado e configurado para 19:30.")
@@ -459,7 +523,7 @@ def main() -> None:
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario))
+    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
