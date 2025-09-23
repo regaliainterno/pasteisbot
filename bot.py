@@ -23,9 +23,9 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 PRECO_FIXO_VENDA = 10.00
 PRECO_FIXO_CUSTO = 4.50
 SABORES_VALIDOS = ['carne', 'frango']
-TIMEZONE = 'America/Sao_Paulo'  # Fuso horário para os relatórios diários
+TIMEZONE = 'America/Sao_Paulo'
 
-# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
+# --- FUNÇÕES DO GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
@@ -63,7 +63,6 @@ def get_file_id(service, file_name, folder_id):
 
 
 def download_dataframe(service, file_id):
-    """Baixa o arquivo do Drive e já converte a coluna de data."""
     COLUNAS = ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda', 'lucro_venda']
     if not file_id:
         return pd.DataFrame(columns=COLUNAS)
@@ -76,8 +75,10 @@ def download_dataframe(service, file_id):
     fh.seek(0)
     try:
         df = pd.read_csv(fh)
-        # Garante que a coluna de data/hora seja tratada como data
         df['data_hora'] = pd.to_datetime(df['data_hora'])
+        if 'lucro_venda' not in df.columns:
+            df['custo_unidade'] = PRECO_FIXO_CUSTO
+            df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * PRECO_FIXO_CUSTO)
         return df
     except (pd.errors.EmptyDataError, KeyError):
         return pd.DataFrame(columns=COLUNAS)
@@ -96,10 +97,9 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- NOVOS COMANDOS DE RELATÓRIO ---
+# --- NOVOS COMANDOS DE RELATÓRIO (COM CORREÇÃO DE FUSO HORÁRIO) ---
 
 async def relatorio_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gera um relatório para um dia específico (padrão: hoje)."""
     try:
         if context.args:
             data_filtro = pd.to_datetime(context.args[0]).date()
@@ -109,92 +109,75 @@ async def relatorio_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             titulo_relatorio = "📊 *Dashboard de Hoje*"
 
         await update.message.reply_text(f"Gerando relatório para {data_filtro.strftime('%d/%m/%Y')}...")
-
         service = get_drive_service()
         file_id = get_file_id(service, DRIVE_FILE_NAME, DRIVE_FOLDER_ID)
         df = download_dataframe(service, file_id)
-
         if df.empty:
             await update.message.reply_text("Nenhuma venda encontrada para gerar relatórios.")
             return
 
-        # Filtra o DataFrame para o dia específico, considerando o fuso horário
-        df_dia = df[df['data_hora'].dt.tz_localize('UTC').dt.tz_convert(TIMEZONE).dt.date == data_filtro]
+        # ----- CORREÇÃO APLICADA AQUI -----
+        df_dia = df[df['data_hora'].dt.tz_convert(TIMEZONE).dt.date == data_filtro]
 
         if df_dia.empty:
             await update.message.reply_text(f"Nenhuma venda registrada no dia {data_filtro.strftime('%d/%m/%Y')}.")
             return
-
-        # Calcula os totais
         total_pasteis = df_dia['quantidade'].sum()
         faturamento_bruto = df_dia['total_venda'].sum()
         custo_total = df_dia['custo_unidade'].multiply(df_dia['quantidade']).sum()
         lucro_liquido = df_dia['lucro_venda'].sum()
-
         relatorio_texto = f"{titulo_relatorio}\n\n"
         relatorio_texto += f"🥟 Pastéis Vendidos: *{int(total_pasteis)}*\n"
         relatorio_texto += f"💰 Faturamento Bruto: *R$ {faturamento_bruto:.2f}*\n"
         relatorio_texto += f"📉 Custo Total: *R$ {custo_total:.2f}*\n"
         relatorio_texto += f"🚀 Lucro Líquido: *R$ {lucro_liquido:.2f}*\n"
-
         await update.message.reply_text(relatorio_texto, parse_mode='Markdown')
-
     except Exception as e:
         await update.message.reply_text(f"Erro ao gerar relatório diário: {e}")
 
 
 async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Gera um relatório de lucro para os últimos N dias."""
     try:
         if not context.args or not context.args[0].isdigit():
             await update.message.reply_text("❌ Erro! Use o formato: `/lucro [dias]`\nExemplo: `/lucro 7`")
             return
-
         dias = int(context.args[0])
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        # ----- CORREÇÃO NO CÁLCULO DE DIAS -----
         data_inicio = hoje - timedelta(days=dias - 1)
 
         await update.message.reply_text(f"Gerando relatório de lucro dos últimos {dias} dias...")
-
         service = get_drive_service()
         file_id = get_file_id(service, DRIVE_FILE_NAME, DRIVE_FOLDER_ID)
         df = download_dataframe(service, file_id)
-
         if df.empty:
             await update.message.reply_text("Nenhuma venda encontrada para gerar relatórios.")
             return
 
-        # Filtra o DataFrame para o período
-        df_periodo = df[df['data_hora'].dt.tz_localize('UTC').dt.tz_convert(TIMEZONE).dt.date >= data_inicio]
+        # ----- CORREÇÃO APLICADA AQUI -----
+        df_periodo = df[(df['data_hora'].dt.tz_convert(TIMEZONE).dt.date >= data_inicio) & (
+                    df['data_hora'].dt.tz_convert(TIMEZONE).dt.date <= hoje)]
 
         if df_periodo.empty:
             await update.message.reply_text(f"Nenhuma venda registrada nos últimos {dias} dias.")
             return
-
         lucro_total_periodo = df_periodo['lucro_venda'].sum()
-
         relatorio_texto = (f"📈 *Lucro dos Últimos {dias} Dias*\n"
-                           f"_{data_inicio.strftime('%d/%m/%Y')} a {hoje.strftime('%d/%m/%Y વિવિધ')}_\n\n"
+                           f"_{data_inicio.strftime('%d/%m/%Y')} a {hoje.strftime('%d/%m/%Y')}_\n\n"
                            f"🚀 Lucro Líquido Total: *R$ {lucro_total_periodo:.2f}*")
-
         await update.message.reply_text(relatorio_texto, parse_mode='Markdown')
-
     except Exception as e:
         await update.message.reply_text(f"Erro ao gerar relatório de período: {e}")
 
 
 async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Envia o arquivo CSV completo para o usuário."""
     try:
         await update.message.reply_text("Buscando o arquivo de vendas no Drive...")
         service = get_drive_service()
         file_id = get_file_id(service, DRIVE_FILE_NAME, DRIVE_FOLDER_ID)
-
         if not file_id:
             await update.message.reply_text("Nenhum arquivo de vendas encontrado.")
             return
-
-        # Baixa o arquivo em memória
         request = service.files().get_media(fileId=file_id)
         fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
@@ -202,19 +185,14 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         while not done:
             status, done = downloader.next_chunk()
         fh.seek(0)
-
-        # Envia o arquivo para o Telegram
         await update.message.reply_document(document=InputFile(fh, filename=DRIVE_FILE_NAME),
                                             caption="Aqui está o seu relatório de vendas completo.")
-
     except Exception as e:
         await update.message.reply_text(f"Ocorreu um erro ao enviar o arquivo: {e}")
 
 
-# --- COMANDOS PRINCIPAIS (ATUALIZADOS) ---
-
+# --- COMANDOS PRINCIPAIS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Envia uma mensagem de boas-vindas com todos os comandos."""
     user_name = update.effective_user.first_name
     await update.message.reply_text(
         f'Olá, {user_name}! Seu assistente de vendas foi atualizado!\n\n'
@@ -235,32 +213,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Registra uma nova venda calculando o lucro."""
     try:
         if len(context.args) != 2:
             raise ValueError("Formato incorreto")
-
         sabor = context.args[0].lower()
         quantidade = int(context.args[1])
-
         if sabor not in SABORES_VALIDOS:
             sabores_str = ", ".join(SABORES_VALIDOS)
             await update.message.reply_text(f"❌ Sabor inválido. Use: *{sabores_str}*.", parse_mode='Markdown')
             return
-
         preco_unidade = PRECO_FIXO_VENDA
         custo_unidade = PRECO_FIXO_CUSTO
         total_venda = quantidade * preco_unidade
         lucro_venda = total_venda - (quantidade * custo_unidade)
-
         await update.message.reply_text("Registrando venda...")
-
         service = get_drive_service()
         file_id = get_file_id(service, DRIVE_FILE_NAME, DRIVE_FOLDER_ID)
         df = download_dataframe(service, file_id)
-
         nova_venda = pd.DataFrame([{
-            'data_hora': pd.to_datetime('now', utc=True),  # Sempre salvar em UTC
+            'data_hora': pd.to_datetime('now', utc=True),
             'sabor': sabor,
             'quantidade': quantidade,
             'preco_unidade': preco_unidade,
@@ -268,10 +239,8 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             'total_venda': total_venda,
             'lucro_venda': lucro_venda
         }])
-
         df = pd.concat([df, nova_venda], ignore_index=True)
         upload_dataframe(service, df, DRIVE_FILE_NAME, file_id, DRIVE_FOLDER_ID)
-
         await update.message.reply_text(
             f'✅ Venda registrada!\n\n'
             f'**Sabor:** {sabor.capitalize()}\n'
@@ -280,7 +249,6 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f'**Lucro:** R$ {lucro_venda:.2f}',
             parse_mode='Markdown'
         )
-
     except (ValueError, IndexError):
         await update.message.reply_text('❌ *Erro!* Formato: `/venda [sabor] [quantidade]`\nEx: /venda carne 5',
                                         parse_mode='Markdown')
@@ -291,20 +259,16 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def main() -> None:
-    """Inicia o bot e registra todos os handlers."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    # Registra todos os comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("diario", relatorio_diario))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
-
-    print("Bot SUPER ATUALIZADO iniciado e escutando...")
+    print("Bot SUPER ATUALIZADO (v3 com correção de fuso) iniciado e escutando...")
     application.run_polling()
 
 
