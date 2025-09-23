@@ -35,7 +35,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():
-    creds = None;
+    creds = None
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
@@ -59,7 +59,7 @@ def get_drive_service():
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false";
+    query = f"name='{file_name}' and trashed=false"
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
@@ -108,7 +108,6 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -213,7 +212,6 @@ async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         if not context.args or len(context.args) % 2 != 0:
             await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor1] [qtd1]...`\nEx: `/estoque carne 20`")
@@ -244,7 +242,6 @@ async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
         if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
@@ -302,28 +299,42 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
 
+# ----- FUNÇÃO ATUALIZADA PARA DEPURAÇÃO -----
 async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     try:
-        if len(context.args) != 2: raise ValueError("Formato incorreto")
+        if len(context.args) != 2:
+            await update.message.reply_text(
+                f"🐛 Erro de Depuração: Eu esperava 2 argumentos, mas recebi {len(context.args)}.")
+            return
+
         sabor = context.args[0].lower()
-        quantidade_consumo = int(context.args[1])
+
+        try:
+            quantidade_consumo = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text(f"🐛 Erro de Depuração: A quantidade '{context.args[1]}' não é um número.")
+            return
+
         if sabor not in SABORES_VALIDOS:
             await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
             return
+
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         service = get_drive_service()
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
         df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
+
         if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
+            await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use `/estoque`.")
             return
+
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
+
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
         df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
@@ -336,23 +347,25 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         consumo_hoje_sabor = df_consumo[
             (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
+
         estoque_atual = estoque_inicial - ja_vendido - ja_consumido
         if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Consumo não registrado! Estoque insuficiente: *{int(estoque_atual)}*.",
+                                            parse_mode='Markdown')
             return
+
         novo_consumo = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
               'custo_total': quantidade_consumo * PRECO_FIXO_CUSTO}])
         df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
         upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
         await update.message.reply_text(
-            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
-    except (ValueError, IndexError):
-        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
+            f'✅ Consumo pessoal registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
     except Exception as e:
         print(
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
+        await update.message.reply_text(
+            f"🐛 Ocorreu um erro inesperado no servidor. Por favor, mostre esta mensagem ao desenvolvedor:\n\n`Tipo do Erro: {type(e).__name__}`\n`Detalhes: {e}`")
 
 
 async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -508,7 +521,6 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def post_init(application: Application) -> None:
-    """Função para iniciar o agendador após o bot ligar."""
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(enviar_relatorio_automatico, 'cron', hour=19, minute=30, args=[application])
     scheduler.start()
@@ -516,7 +528,6 @@ async def post_init(application: Application) -> None:
 
 
 def main() -> None:
-    """Inicia o bot e registra os handlers e o agendador de tarefas."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
@@ -533,7 +544,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
 
-    print("Bot Definitivo (v11) iniciado e escutando...")
+    print("Bot v12 COM DEBUG NO CONSUMO iniciado...")
     application.run_polling()
 
 
