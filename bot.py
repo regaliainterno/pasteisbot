@@ -146,9 +146,91 @@ def gerar_texto_relatorio_diario(data_filtro):
     return relatorio_texto
 
 
-# --- DEFINIÇÃO DOS COMANDOS (sem alterações) ---
-# ... (As funções start, registrar_usuario, ver_estoque_atual, gerar_grafico, etc., permanecem as mesmas)
+# ----- FUNÇÃO ATUALIZADA -----
+async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        plt.style.use('seaborn-v0_8-whitegrid')  # Define um estilo mais bonito
+
+        if not context.args or not context.args[0].isdigit():
+            await update.message.reply_text("❌ Erro! Formato: `/grafico [dias]`\nExemplo: `/grafico 7`")
+            return
+
+        dias = int(context.args[0])
+        await update.message.reply_text(f"Gerando gráfico de lucro dos últimos {dias} dias...")
+
+        service = get_drive_service()
+        vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
+        colunas_vendas = ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda',
+                          'lucro_venda']
+        df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, colunas_vendas)
+
+        if df_vendas.empty:
+            await update.message.reply_text("Nenhuma venda encontrada para gerar o gráfico.")
+            return
+
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        data_inicio = hoje - timedelta(days=dias - 1)
+        df_periodo = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date >= data_inicio]
+
+        if df_periodo.empty:
+            await update.message.reply_text(f"Nenhuma venda nos últimos {dias} dias.")
+            return
+
+        lucro_por_dia = df_periodo.groupby(df_periodo['data_hora'].dt.tz_convert(TIMEZONE).dt.date)['lucro_venda'].sum()
+
+        fig, ax = plt.subplots(figsize=(12, 7))  # Aumenta o tamanho da imagem
+
+        # Cria as barras
+        bars = ax.bar(lucro_por_dia.index, lucro_por_dia.values, color='#4A90E2', label='Lucro Diário')
+
+        # Adiciona os valores em cima de cada barra
+        for bar in bars:
+            yval = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width() / 2.0, yval, f'R${yval:.2f}', va='bottom' if yval >= 0 else 'top',
+                    ha='center')
+
+        # Adiciona a linha de média
+        media_lucro = lucro_por_dia.mean()
+        ax.axhline(media_lucro, color='red', linestyle='--', linewidth=2, label=f'Média: R$ {media_lucro:.2f}')
+
+        # Melhora a formatação
+        ax.set_title(f'Lucro Líquido por Dia (Últimos {dias} Dias)', fontsize=16, pad=20)
+        ax.set_ylabel('Lucro (R$)', fontsize=12)
+        ax.set_xlabel('Data', fontsize=12)
+        ax.tick_params(axis='x', rotation=45)
+        ax.grid(axis='y', linestyle='--', alpha=0.7)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.legend()
+
+        ax.set_xticklabels([d.strftime('%d/%m') for d in lucro_por_dia.index])
+        ax.set_ylim(top=ax.get_ylim()[1] * 1.15)  # Dá mais espaço no topo
+
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+        plt.close(fig)
+
+        # Cria uma legenda mais detalhada
+        total_lucro = lucro_por_dia.sum()
+        caption = (f"📈 *Relatório Gráfico de Lucro*\n\n"
+                   f"▫️ Período Analisado: *Últimos {dias} dias*\n"
+                   f"▫️ Lucro Total no Período: *R$ {total_lucro:.2f}*\n"
+                   f"▫️ Média de Lucro Diário: *R$ {media_lucro:.2f}*")
+
+        await update.message.reply_photo(photo=buf, caption=caption, parse_mode='Markdown')
+
+    except Exception as e:
+        print(
+            f"--- ERRO INESPERADO EM gerar_grafico ---\n{traceback.format_exc()}\n----------------------------------------")
+        await update.message.reply_text(f"🐛 Erro ao gerar gráfico: {e}")
+
+
+# --- DEMAIS COMANDOS (sem alterações) ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     await update.message.reply_text(
         'Olá! Bem-vindo ao seu sistema de gestão v5.0!\n\n'
         '**Novos Comandos:**\n'
@@ -162,6 +244,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     chat_id = update.effective_chat.id
     await update.message.reply_text(
         f"✅ Ótimo! Seu chat foi registrado.\n\n"
@@ -173,6 +256,7 @@ async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         service = get_drive_service()
@@ -200,47 +284,8 @@ async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🐛 Erro ao verificar estoque: {e}")
 
 
-async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if not context.args or not context.args[0].isdigit():
-            await update.message.reply_text("❌ Erro! Formato: `/grafico [dias]`\nExemplo: `/grafico 7`")
-            return
-        dias = int(context.args[0])
-        await update.message.reply_text(f"Gerando gráfico de lucro dos últimos {dias} dias...")
-        service = get_drive_service()
-        vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
-        colunas_vendas = ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda',
-                          'lucro_venda']
-        df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, colunas_vendas)
-        if df_vendas.empty:
-            await update.message.reply_text("Nenhuma venda encontrada para gerar o gráfico.")
-            return
-        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-        data_inicio = hoje - timedelta(days=dias - 1)
-        df_periodo = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date >= data_inicio]
-        if df_periodo.empty:
-            await update.message.reply_text(f"Nenhuma venda nos últimos {dias} dias.")
-            return
-        lucro_por_dia = df_periodo.groupby(df_periodo['data_hora'].dt.tz_convert(TIMEZONE).dt.date)['lucro_venda'].sum()
-        fig, ax = plt.subplots(figsize=(10, 6))
-        lucro_por_dia.plot(kind='bar', ax=ax, color='skyblue')
-        ax.set_title(f'Lucro Líquido por Dia (Últimos {dias} Dias)', fontsize=16)
-        ax.set_ylabel('Lucro (R$)')
-        ax.set_xlabel('Data')
-        ax.tick_params(axis='x', rotation=45)
-        ax.grid(axis='y', linestyle='--', alpha=0.7)
-        ax.set_xticklabels([d.strftime('%d/%m') for d in lucro_por_dia.index])
-        plt.tight_layout()
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        buf.seek(0)
-        plt.close(fig)
-        await update.message.reply_photo(photo=buf, caption=f"Total lucrado no período: R$ {lucro_por_dia.sum():.2f}")
-    except Exception as e:
-        await update.message.reply_text(f"🐛 Erro ao gerar gráfico: {e}")
-
-
 async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         if context.args:
             data_filtro = pd.to_datetime(context.args[0]).date()
@@ -253,6 +298,7 @@ async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT
 
 
 async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     if not TELEGRAM_CHAT_ID:
         print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
         return
@@ -263,6 +309,7 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         if not context.args or len(context.args) % 2 != 0:
             await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor1] [qtd1]...`\nEx: `/estoque carne 20`")
@@ -293,6 +340,7 @@ async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
@@ -349,6 +397,7 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         if not context.args or not context.args[0].isdigit():
             await update.message.reply_text("❌ Erro! Use o formato: `/lucro [dias]`\nExemplo: `/lucro 7`")
@@ -380,6 +429,7 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     try:
         await update.message.reply_text("Buscando o arquivo de vendas no Drive...")
         service = get_drive_service()
@@ -400,7 +450,6 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"Ocorreu um erro ao enviar o arquivo: {e}")
 
 
-# --- NOVA FUNÇÃO DE INICIALIZAÇÃO PARA O AGENDADOR ---
 async def post_init(application: Application) -> None:
     """Função para iniciar o agendador após o bot ligar."""
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
@@ -409,17 +458,13 @@ async def post_init(application: Application) -> None:
     print("Agendador de tarefas iniciado e configurado para 19:30.")
 
 
-# --- FUNÇÃO PRINCIPAL ATUALIZADA ---
-
 def main() -> None:
     """Inicia o bot e registra os handlers e o agendador de tarefas."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
-    # Adiciona a função post_init para garantir que o agendador inicie corretamente
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
-    # Registra todos os comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("registrar", registrar_usuario))
     application.add_handler(CommandHandler("estoque", definir_estoque))
@@ -430,7 +475,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
 
-    print("Bot com Gráficos e Relatórios Automáticos (v6 CORRIGIDO) iniciado e escutando...")
+    print("Bot com Gráficos Melhorados (v7) iniciado e escutando...")
     application.run_polling()
 
 
