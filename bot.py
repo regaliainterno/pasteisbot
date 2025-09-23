@@ -9,7 +9,7 @@ import io
 import traceback
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.asyncio import AsyncScheduler
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -47,9 +47,9 @@ def get_drive_service():
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
                 creds = flow.run_local_server(port=0)
             else:
-                google_token_base64 = os.environ.get('GOOGLE_TOKEN_BASE64')
-                if google_token_base64:
-                    decoded_token = base64.b64decode(google_token_base64)
+                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE64')
+                if google_token_base_64:
+                    decoded_token = base64.b64decode(google_token_base_64)
                     creds = pickle.loads(decoded_token)
                 else:
                     raise ValueError("Token ou credenciais não encontrados.")
@@ -67,7 +67,11 @@ def get_file_id(service, file_name, folder_id):
 
 
 def download_dataframe(service, file_name, file_id, default_cols):
-    if not file_id: return pd.DataFrame(columns=default_cols)
+    if not file_id:
+        df = pd.DataFrame(columns=default_cols)
+        if not df.empty or default_cols:
+            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+        return df
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
@@ -76,13 +80,20 @@ def download_dataframe(service, file_name, file_id, default_cols):
     fh.seek(0)
     try:
         df = pd.read_csv(fh)
+        if df.empty:
+            df = pd.DataFrame(columns=default_cols)
+            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+            return df
         df[df.columns[0]] = pd.to_datetime(df[df.columns[0]])
         if file_name == DRIVE_VENDAS_FILE and 'lucro_venda' not in df.columns:
             df['custo_unidade'] = PRECO_FIXO_CUSTO
             df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * PRECO_FIXO_CUSTO)
         return df
     except (pd.errors.EmptyDataError, KeyError, IndexError):
-        return pd.DataFrame(columns=default_cols)
+        df = pd.DataFrame(columns=default_cols)
+        if default_cols:
+            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+        return df
 
 
 def upload_dataframe(service, df, file_name, file_id, folder_id):
@@ -97,7 +108,6 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -109,10 +119,9 @@ def gerar_texto_relatorio_diario(data_filtro):
     df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid, ['data', 'sabor', 'quantidade_inicial'])
     df_estoque_dia = df_estoque[df_estoque['data'].dt.date == data_filtro]
     consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-    df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
-                                    ['data_hora', 'sabor', 'quantidade', 'custo_total'])
+    colunas_consumo = ['data_hora', 'sabor', 'quantidade', 'custo_total']
+    df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, colunas_consumo)
     df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == data_filtro]
-
     titulo_relatorio = f"📊 *Dashboard do Dia {data_filtro.strftime('%d/%m/%Y')}*"
     relatorio_texto = f"{titulo_relatorio}\n\n*Resumo Financeiro (das Vendas)*\n"
     faturamento_bruto = 0
@@ -125,7 +134,6 @@ def gerar_texto_relatorio_diario(data_filtro):
                             f"  - Lucro (Margem): *R$ {lucro_liquido_margem:.2f}*")
     else:
         relatorio_texto += "_Nenhuma venda registrada neste dia._"
-
     relatorio_texto += "\n\n*Gestão de Estoque*\n"
     if not df_estoque_dia.empty:
         for index, row in df_estoque_dia.iterrows():
@@ -136,7 +144,6 @@ def gerar_texto_relatorio_diario(data_filtro):
             sobra = inicial - vendido - consumido
             relatorio_texto += (
                 f"  - `{sabor.capitalize()}`: Começou com {int(inicial)}, vendeu {int(vendido)}, consumiu {int(consumido)}, sobrou *{int(sobra)}*\n")
-
         relatorio_texto += "\n---\n\n*Resultado Final do Dia*\n"
         custo_inicial_total = df_estoque_dia['quantidade_inicial'].sum() * PRECO_FIXO_CUSTO
         custo_consumo_pessoal = df_consumo_dia['custo_total'].sum()
@@ -150,16 +157,13 @@ def gerar_texto_relatorio_diario(data_filtro):
             relatorio_texto += f"  - Resultado: *📉 Prejuízo de R$ {-resultado_do_dia:.2f}*"
     else:
         relatorio_texto += "_Nenhum estoque inicial definido para este dia._"
-
     return relatorio_texto
 
 
-# --- FUNÇÃO AUTOMÁTICA (que estava faltando) ---
 async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not TELEGRAM_CHAT_ID:
         print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
         return
-
     print(f"Executando relatório automático para o chat {TELEGRAM_CHAT_ID}...")
     data_hoje = pd.Timestamp.now(tz=TIMEZONE).date()
     texto_relatorio = gerar_texto_relatorio_diario(data_hoje)
@@ -167,15 +171,38 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
+
+# ----- FUNÇÃO ATUALIZADA -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        'Olá! Bem-vindo ao seu sistema de gestão v8.0!\n\n'
-        '**NOVO COMANDO:**\n'
-        '**/consumo [sabor] [qtd]** - _Registra um consumo pessoal._\n\n'
-        '**Comandos Principais:**\n'
-        '`/estoque`, `/venda`, `/diario`, `/lucro`, `/vendas`, `/ver_estoque`, `/grafico`, `/registrar`',
-        parse_mode='Markdown'
+    user_name = update.effective_user.first_name
+    help_text = (
+        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas.\n\n"
+        "Aqui está a lista de todos os comandos disponíveis:\n\n"
+        "**GESTÃO DIÁRIA**\n"
+        "*/estoque [sabor] [qtd]...*\n"
+        "Define o estoque inicial do dia. _Ex: /estoque carne 20 frango 15_\n\n"
+        "*/venda [sabor] [qtd]*\n"
+        "Registra uma venda e dá baixa no estoque. _Ex: /venda carne 2_\n\n"
+        "*/consumo [sabor] [qtd]*\n"
+        "Registra um consumo pessoal (custo). _Ex: /consumo frango 1_\n\n"
+        "*/ver_estoque*\n"
+        "Mostra uma consulta rápida do estoque atual.\n\n"
+        "**RELATÓRIOS E ANÁLISE**\n"
+        "*/diario*\n"
+        "Gera o relatório completo de hoje (vendas, estoque, resultado).\n\n"
+        "*/diario AAAA-MM-DD*\n"
+        "Gera o relatório para uma data específica. _Ex: /diario 2025-09-22_\n\n"
+        "*/lucro [dias]*\n"
+        "Mostra o lucro acumulado nos últimos dias. _Ex: /lucro 7_\n\n"
+        "*/grafico [dias]*\n"
+        "Gera um gráfico de desempenho do lucro. _Ex: /grafico 7_\n\n"
+        "*/vendas*\n"
+        "Envia o arquivo `.csv` com o histórico completo de vendas.\n\n"
+        "**CONFIGURAÇÃO**\n"
+        "*/registrar*\n"
+        "Mostra seu ID de chat para ativar os relatórios automáticos."
     )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -245,7 +272,8 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
         ja_vendido = vendas_hoje_sabor['quantidade'].sum()
         consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, ['data_hora', 'sabor', 'quantidade'])
+        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
+                                        ['data_hora', 'sabor', 'quantidade', 'custo_total'])
         consumo_hoje_sabor = df_consumo[
             (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
@@ -271,70 +299,6 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         print(
             f"--- ERRO INESPERADO EM registrar_venda ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
-
-
-async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if len(context.args) != 2: raise ValueError("Formato incorreto")
-        sabor = context.args[0].lower()
-        quantidade_consumo = int(context.args[1])
-        if sabor not in SABORES_VALIDOS:
-            await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
-            return
-        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-        service = get_drive_service()
-        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
-        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
-                                        ['data', 'sabor', 'quantidade_inicial'])
-        estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
-        if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
-            return
-        estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
-        if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
-            return
-        estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
-        vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
-        df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
-        vendas_hoje_sabor = df_vendas[
-            (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
-        ja_vendido = vendas_hoje_sabor['quantidade'].sum()
-        consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-        df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
-                                        ['data_hora', 'sabor', 'quantidade', 'custo_total'])
-        consumo_hoje_sabor = df_consumo[
-            (df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_consumo['sabor'] == sabor)]
-        ja_consumido = consumo_hoje_sabor['quantidade'].sum()
-        estoque_atual = estoque_inicial - ja_vendido - ja_consumido
-        if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
-            return
-        novo_consumo = pd.DataFrame(
-            [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
-              'custo_total': quantidade_consumo * PRECO_FIXO_CUSTO}])
-        df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
-        upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
-        await update.message.reply_text(
-            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
-    except (ValueError, IndexError):
-        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
-    except Exception as e:
-        print(
-            f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
-
-
-async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if context.args:
-            data_filtro = pd.to_datetime(context.args[0]).date()
-        else:
-            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
-        texto = gerar_texto_relatorio_diario(data_filtro)
-        await update.message.reply_text(texto, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -436,8 +400,7 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
         data_inicio = hoje - timedelta(days=dias - 1)
         await update.message.reply_text(f"Gerando relatório de lucro dos últimos {dias} dias...")
         service = get_drive_service()
-        vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
-        df = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
+        df = download_dataframe(service, DRIVE_VENDAS_FILE, get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID),
                                 ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda',
                                  'lucro_venda'])
         if df.empty:
@@ -491,19 +454,18 @@ def main() -> None:
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
-    # Registra todos os comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("registrar", registrar_usuario))
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
+    application.add_handler(CommandHandler("diario", relatorio_diario))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
 
-    print("Bot Definitivo (v9) iniciado e escutando...")
+    print("Bot Definitivo (v10) iniciado e escutando...")
     application.run_polling()
 
 
