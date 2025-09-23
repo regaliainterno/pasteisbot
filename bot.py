@@ -78,7 +78,6 @@ def download_dataframe(service, file_name, file_id, default_cols):
     try:
         df = pd.read_csv(fh)
         df[df.columns[0]] = pd.to_datetime(df[df.columns[0]])
-        # Lógica de migração para vendas antigas
         if file_name == DRIVE_VENDAS_FILE and 'lucro_venda' not in df.columns:
             df['custo_unidade'] = PRECO_FIXO_CUSTO
             df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * PRECO_FIXO_CUSTO)
@@ -127,36 +126,27 @@ async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not context.args or len(context.args) % 2 != 0:
             await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor1] [qtd1]...`\nEx: `/estoque carne 20`")
             return
-
         hoje_str = pd.Timestamp.now(tz=TIMEZONE).strftime('%Y-%m-%d')
         await update.message.reply_text("Atualizando estoque do dia...")
-
         service = get_drive_service()
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
         df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
         df_estoque['data'] = pd.to_datetime(df_estoque['data']).dt.strftime('%Y-%m-%d')
-
         resumo_estoque = []
         for i in range(0, len(context.args), 2):
             sabor = context.args[i].lower()
             quantidade = int(context.args[i + 1])
-
             if sabor not in SABORES_VALIDOS:
                 await update.message.reply_text(f"Sabor '{sabor}' inválido. Ignorando.")
                 continue
-
             df_estoque = df_estoque[~((df_estoque['data'] == hoje_str) & (df_estoque['sabor'] == sabor))]
-
             novo_estoque = pd.DataFrame([{'data': hoje_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
             df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
             resumo_estoque.append(f"  - {sabor.capitalize()}: {quantidade} unidades")
-
         upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
-
         mensagem_resumo = "✅ Estoque inicial de hoje definido:\n" + "\n".join(resumo_estoque)
         await update.message.reply_text(mensagem_resumo)
-
     except Exception as e:
         await update.message.reply_text(f"🐛 Erro inesperado ao definir estoque: {e}")
 
@@ -170,26 +160,20 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             sabores_str = ", ".join(SABORES_VALIDOS)
             await update.message.reply_text(f"❌ Sabor inválido. Use: *{sabores_str}*.", parse_mode='Markdown')
             return
-
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         service = get_drive_service()
-
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
         df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
-
         if estoque_hoje.empty:
             await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use o comando `/estoque`.")
             return
-
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
             await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
-
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
-
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
         colunas_vendas = ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda',
                           'lucro_venda']
@@ -197,29 +181,23 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         vendas_hoje_sabor = df_vendas[
             (df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje) & (df_vendas['sabor'] == sabor)]
         ja_vendido = vendas_hoje_sabor['quantidade'].sum()
-
         estoque_atual = estoque_inicial - ja_vendido
-
         if quantidade_venda > estoque_atual:
             await update.message.reply_text(f"❌ Venda não registrada! Estoque insuficiente.\n"
                                             f"**Estoque atual de {sabor.capitalize()}:** {int(estoque_atual)} unidades.")
             return
-
         preco_unidade = PRECO_FIXO_VENDA
         custo_unidade = PRECO_FIXO_CUSTO
         total_venda = quantidade_venda * preco_unidade
         lucro_venda = total_venda - (quantidade_venda * custo_unidade)
-
         nova_venda = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_venda,
               'preco_unidade': preco_unidade, 'custo_unidade': custo_unidade, 'total_venda': total_venda,
               'lucro_venda': lucro_venda}])
         df_vendas = pd.concat([df_vendas, nova_venda], ignore_index=True)
         upload_dataframe(service, df_vendas, DRIVE_VENDAS_FILE, vendas_fid, DRIVE_FOLDER_ID)
-
         await update.message.reply_text(
             f'✅ Venda registrada! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_venda)}')
-
     except (ValueError, IndexError):
         await update.message.reply_text('❌ *Erro!* Formato: `/venda [sabor] [quantidade]`\nEx: /venda carne 5',
                                         parse_mode='Markdown')
@@ -229,7 +207,9 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
 
+# ----- FUNÇÃO ATUALIZADA -----
 async def relatorio_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Relatório diário completo com Ponto de Equilíbrio."""
     try:
         if context.args:
             data_filtro = pd.to_datetime(context.args[0]).date()
@@ -252,30 +232,42 @@ async def relatorio_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                                         ['data', 'sabor', 'quantidade_inicial'])
         df_estoque_dia = df_estoque[df_estoque['data'].dt.date == data_filtro]
 
-        relatorio_texto = f"{titulo_relatorio}\n\n*Resumo Financeiro*\n"
+        # --- Monta o Relatório ---
+        relatorio_texto = f"{titulo_relatorio}\n\n*Resumo Financeiro (das Vendas)*\n"
+        faturamento_bruto = 0
         if not df_vendas_dia.empty:
             total_pasteis = df_vendas_dia['quantidade'].sum()
             faturamento_bruto = df_vendas_dia['total_venda'].sum()
-            lucro_liquido = df_vendas_dia['lucro_venda'].sum()
+            lucro_liquido_margem = df_vendas_dia['lucro_venda'].sum()
             relatorio_texto += (f"  - Pastéis Vendidos: *{int(total_pasteis)}*\n"
                                 f"  - Faturamento Bruto: *R$ {faturamento_bruto:.2f}*\n"
-                                f"  - Lucro Líquido: *R$ {lucro_liquido:.2f}*")
+                                f"  - Lucro (Margem): *R$ {lucro_liquido_margem:.2f}*")
         else:
             relatorio_texto += "_Nenhuma venda registrada neste dia._"
 
         relatorio_texto += "\n\n*Gestão de Estoque*\n"
         if not df_estoque_dia.empty:
-            prejuizo_total = 0
             for index, row in df_estoque_dia.iterrows():
                 sabor = row['sabor']
                 inicial = row['quantidade_inicial']
                 vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
                 sobra = inicial - vendido
-                prejuizo = sobra * PRECO_FIXO_CUSTO
-                prejuizo_total += prejuizo
                 relatorio_texto += (
                     f"  - `{sabor.capitalize()}`: Começou com {int(inicial)}, vendeu {int(vendido)}, sobrou *{int(sobra)}*\n")
-            relatorio_texto += f"\nCusto total das sobras (prejuízo): *R$ {prejuizo_total:.2f}*"
+
+            # --- SEÇÃO PONTO DE EQUILÍBRIO ---
+            relatorio_texto += "\n---\n\n*Ponto de Equilíbrio do Dia*\n"
+            custo_inicial_total = df_estoque_dia['quantidade_inicial'].sum() * PRECO_FIXO_CUSTO
+            resultado_do_dia = faturamento_bruto - custo_inicial_total
+
+            relatorio_texto += f"  - Investimento em Estoque: *R$ {custo_inicial_total:.2f}*\n"
+            relatorio_texto += f"  - Faturamento das Vendas: *R$ {faturamento_bruto:.2f}*\n"
+
+            if resultado_do_dia >= 0:
+                relatorio_texto += f"  - Resultado Final: *🚀 Lucro de R$ {resultado_do_dia:.2f}*"
+            else:
+                relatorio_texto += f"  - Resultado Final: *📉 R$ {resultado_do_dia:.2f}*\n"
+                relatorio_texto += f"  _(Faltam R$ {-resultado_do_dia:.2f} para cobrir o investimento)_"
         else:
             relatorio_texto += "_Nenhum estoque inicial definido para este dia._"
 
@@ -310,7 +302,7 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text(f"Nenhuma venda registrada nos últimos {dias} dias.")
             return
         lucro_total_periodo = df_periodo['lucro_venda'].sum()
-        relatorio_texto = (f"📈 *Lucro dos Últimos {dias} Dias*\n"
+        relatorio_texto = (f"📈 *Lucro (Margem) dos Últimos {dias} Dias*\n"
                            f"_{data_inicio.strftime('%d/%m/%Y')} a {hoje.strftime('%d/%m/%Y')}_\n\n"
                            f"🚀 Lucro Líquido Total: *R$ {lucro_total_periodo:.2f}*")
         await update.message.reply_text(relatorio_texto, parse_mode='Markdown')
@@ -340,7 +332,6 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 def main() -> None:
-    """Inicia o bot e registra todos os handlers."""
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
@@ -352,7 +343,7 @@ def main() -> None:
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
 
-    print("Bot com Gestão de Estoque (v4 COMPLETO) iniciado e escutando...")
+    print("Bot com Ponto de Equilíbrio (v5) iniciado e escutando...")
     application.run_polling()
 
 
