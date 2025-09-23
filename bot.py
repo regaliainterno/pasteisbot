@@ -35,7 +35,7 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():
-    creds = None;
+    creds = None
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
@@ -67,7 +67,7 @@ def get_drive_service():
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false";
+    query = f"name='{file_name}' and trashed=false"
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
@@ -116,7 +116,6 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -180,37 +179,27 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
+
+# ----- FUNÇÃO ATUALIZADA PARA O TESTE DEFINITIVO -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
-    help_text = (
-        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas.\n\n"
-        "Aqui está a lista de todos os comandos disponíveis:\n\n"
-        "**GESTÃO DIÁRIA**\n"
-        "*/estoque [sabor] [qtd]...*\n"
-        "Define o estoque inicial do dia. _Ex: /estoque carne 20 frango 15_\n\n"
-        "*/venda [sabor] [qtd]*\n"
-        "Registra uma venda e dá baixa no estoque. _Ex: /venda carne 2_\n\n"
-        "*/consumo [sabor] [qtd]*\n"
-        "Registra um consumo pessoal (custo). _Ex: /consumo frango 1_\n\n"
-        "*/ver_estoque*\n"
-        "Mostra uma consulta rápida do estoque atual.\n\n"
-        "**RELATÓRIOS E ANÁLISE**\n"
-        "*/diario*\n"
-        "Gera o relatório completo de hoje (vendas, estoque, resultado).\n\n"
-        "*/diario AAAA-MM-DD*\n"
-        "Gera o relatório para uma data específica. _Ex: /diario 2025-09-22_\n\n"
-        "*/lucro [dias]*\n"
-        "Mostra o lucro acumulado nos últimos dias. _Ex: /lucro 7_\n\n"
-        "*/grafico [dias]*\n"
-        "Gera um gráfico de desempenho do lucro. _Ex: /grafico 7_\n\n"
-        "*/vendas*\n"
-        "Envia o arquivo `.csv` com o histórico completo de vendas.\n\n"
-        "**CONFIGURAÇÃO**\n"
-        "*/registrar*\n"
-        "Mostra seu ID de chat para ativar os relatórios automáticos.\n\n"
-        "*/debugvars* - _(Para diagnóstico de problemas)_"
+    await update.message.reply_text(
+        f"Olá, {user_name}! Se você está vendo esta mensagem, a ATUALIZAÇÃO v13 FUNCIONOU! ✅\n\n"
+        "Agora, por favor, teste o comando /debugvars"
     )
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+
+
+async def debug_vars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    creds_json_val = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    token_b64_val = os.environ.get("GOOGLE_TOKEN_BASE_64")
+    message = "--- Status das Variáveis de Ambiente no Servidor ---\n\n"
+    message += f"GOOGLE_CREDENTIALS_JSON:\n"
+    message += f"  - Definida: {'Sim' if creds_json_val else 'NÃO'}\n"
+    message += f"  - Tamanho: {len(creds_json_val) if creds_json_val else 0} caracteres\n\n"
+    message += f"GOOGLE_TOKEN_BASE_64:\n"
+    message += f"  - Definida: {'Sim' if token_b64_val else 'NÃO'}\n"
+    message += f"  - Tamanho: {len(token_b64_val) if token_b64_val else 0} caracteres"
+    await update.message.reply_text(f"<pre>{message}</pre>", parse_mode='HTML')
 
 
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -221,6 +210,7 @@ async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+# ... (Todas as outras funções de comando permanecem aqui, sem alterações)
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not context.args or len(context.args) % 2 != 0:
@@ -543,8 +533,9 @@ def main() -> None:
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
+    application.add_handler(CommandHandler("debugvars", debug_vars))
 
-    print("Bot Final (v12) iniciado e escutando...")
+    print("Bot Final (v13 - Teste de Deploy) iniciado...")
     application.run_polling()
 
 
