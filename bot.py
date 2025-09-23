@@ -15,10 +15,13 @@ from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
 # --- CONFIGURAÇÕES LENDO DE VARIÁVEIS DE AMBIENTE ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DRIVE_FILE_NAME = "vendas_pasteis.csv"
-# A ID da pasta é opcional, será lida da variável de ambiente se existir
 DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 
-# --- AUTENTICAÇÃO E FUNÇÕES DO GOOGLE DRIVE (MODIFICADO PARA RAILWAY) ---
+# --- NOVAS CONFIGURAÇÕES DO NEGÓCIO ---
+PRECO_FIXO = 10.00
+SABORES_VALIDOS = ['carne', 'frango']
+
+# --- AUTENTICAÇÃO E FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
@@ -26,37 +29,33 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 def get_drive_service():
     """Autentica e retorna um objeto de serviço para o Google Drive."""
     creds = None
-
-    # No Railway, o token.pickle será recriado em memória a cada deploy
-    # a partir da variável de ambiente.
     google_token_base64 = os.environ.get('GOOGLE_TOKEN_BASE64')
     if google_token_base64:
         try:
             decoded_token = base64.b64decode(google_token_base64)
             creds = pickle.loads(decoded_token)
         except (pickle.UnpicklingError, base64.binascii.Error) as e:
-            raise ValueError(f"Erro ao decodificar GOOGLE_TOKEN_BASE64: {e}")
+            # Se estiver rodando localmente, pode tentar carregar o arquivo
+            if os.path.exists('token.pickle'):
+                with open('token.pickle', 'rb') as token:
+                    creds = pickle.load(token)
+            else:
+                raise ValueError(f"Erro ao decodificar GOOGLE_TOKEN_BASE64: {e}")
 
-    # Se o token não existir ou for inválido, tenta usar as credenciais JSON.
-    # Este fluxo é mais um fallback, o ideal é que o token exista.
+    # Se não houver credenciais, tenta o fluxo local (para a primeira execução no PC)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-            if not google_creds_json:
+            if os.path.exists('credentials.json'):
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            else:
                 raise ValueError(
-                    "ERRO: Variáveis de ambiente GOOGLE_TOKEN_BASE64 ou GOOGLE_CREDENTIALS_JSON não encontradas.")
-
-            # Recria o token a partir do JSON (exigiria re-autenticação se o token expirasse)
-            creds_info = json.loads(google_creds_json)
-            # Este fluxo NÃO DEVE ser usado para o primeiro login no Railway
-            # pois precisa de interação do usuário. O token.pickle (em base64) é essencial.
-            flow = InstalledAppFlow.from_client_config(creds_info, SCOPES)
-            # A linha abaixo é apenas ilustrativa, não funcionará no servidor.
-            # creds = flow.run_local_server(port=0)
-            raise ValueError(
-                "Token inválido ou expirado. Gere um novo 'token.pickle' localmente e atualize a variável GOOGLE_TOKEN_BASE64.")
+                    "Token inválido ou expirado E 'credentials.json' não encontrado. Gere um novo token localmente.")
+        # Salva o token localmente se possível
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
 
     return build('drive', 'v3', credentials=creds)
 
@@ -102,29 +101,55 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- COMANDOS DO BOT (sem alterações) ---
+# --- COMANDOS DO BOT (COM ALTERAÇÕES) ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """[ATUALIZADO] Envia uma mensagem de boas-vindas com os novos comandos."""
     user_name = update.effective_user.first_name
+    sabores_str = " e ".join(SABORES_VALIDOS)
     await update.message.reply_text(
         f'Olá, {user_name}! Bem-vindo ao seu assistente de vendas de pastéis.\n\n'
-        'Use os seguintes comandos:\n'
-        '/venda [sabor] [qtd] [preço] - Registra uma nova venda.\n'
-        'Ex: /venda carne 2 7.50\n\n'
-        '/relatorio - Mostra o resumo das vendas.'
+        f'O preço de todos os pastéis é fixo em **R$ {PRECO_FIXO:.2f}**.\n'
+        f'Sabores disponíveis: **{sabores_str}**.\n\n'
+        '**Use os seguintes comandos:**\n'
+        '**/venda [sabor] [quantidade]** - Registra uma nova venda.\n'
+        'Ex: /venda frango 3\n\n'
+        '**/relatorio** - Mostra o resumo das vendas.',
+        parse_mode='Markdown'
     )
 
 
 async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """[ATUALIZADO] Registra uma nova venda com preço fixo e sabores validados."""
     try:
-        sabor = context.args[0]
+        # Validação do número de argumentos
+        if len(context.args) != 2:
+            raise ValueError("Número incorreto de argumentos.")
+
+        sabor = context.args[0].lower()  # Converte para minúsculas para facilitar a validação
         quantidade = int(context.args[1])
-        preco_unidade = float(context.args[2])
+
+        # Validação do sabor
+        if sabor not in SABORES_VALIDOS:
+            sabores_str = ", ".join(SABORES_VALIDOS)
+            await update.message.reply_text(
+                f"❌ Sabor inválido: '{sabor}'.\n\n"
+                f"Por favor, use um dos sabores válidos: **{sabores_str}**.",
+                parse_mode='Markdown'
+            )
+            return
+
+        # Cálculo com preço fixo
+        preco_unidade = PRECO_FIXO
         total_venda = quantidade * preco_unidade
-        await update.message.reply_text("Registrando venda na nuvem...")
+
+        await update.message.reply_text("Registrando venda...")
+
         service = get_drive_service()
         file_id = get_file_id(service, DRIVE_FILE_NAME, DRIVE_FOLDER_ID)
+
         df = download_dataframe(service, file_id)
+
         nova_venda = pd.DataFrame([{
             'data_hora': pd.to_datetime('now', utc=True).strftime('%Y-%m-%d %H:%M:%S'),
             'sabor': sabor,
@@ -132,19 +157,25 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             'preco_unidade': preco_unidade,
             'total_venda': total_venda
         }])
+
         df = pd.concat([df, nova_venda], ignore_index=True)
+
         upload_dataframe(service, df, DRIVE_FILE_NAME, file_id, DRIVE_FOLDER_ID)
+
         await update.message.reply_text(
             f'✅ Venda registrada com sucesso!\n\n'
-            f'Sabor: {sabor}\n'
-            f'Quantidade: {quantidade}\n'
-            f'Total: R$ {total_venda:.2f}'
+            f'**Sabor:** {sabor.capitalize()}\n'
+            f'**Quantidade:** {quantidade}\n'
+            f'**Total:** R$ {total_venda:.2f}',
+            parse_mode='Markdown'
         )
-    except (IndexError, ValueError):
+
+    except (ValueError, IndexError):
         await update.message.reply_text(
-            '❌ Erro! Use o formato correto:\n'
-            '/venda [sabor] [quantidade] [preço_unitário]\n\n'
-            'Exemplo: /venda frango 3 8.00'
+            '❌ **Erro!** Use o formato correto:\n'
+            '**/venda [sabor] [quantidade]**\n\n'
+            'Exemplo: /venda carne 5',
+            parse_mode='Markdown'
         )
     except Exception as e:
         print(f"Ocorreu um erro: {e}")
@@ -152,6 +183,7 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def gerar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gera e envia um relatório de vendas (sem alterações)."""
     try:
         await update.message.reply_text("Gerando relatório, buscando dados no Drive...")
         service = get_drive_service()
@@ -181,6 +213,8 @@ async def gerar_relatorio(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 def main() -> None:
     """Inicia o bot."""
+    # Para rodar localmente, você pode definir as variáveis aqui se não quiser usar as do sistema
+    # Ex: TELEGRAM_TOKEN = "SEU_TOKEN_AQUI"
     if not TELEGRAM_TOKEN:
         raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
 
@@ -188,7 +222,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("relatorio", gerar_relatorio))
-    print("Bot iniciado na nuvem e escutando...")
+    print("Bot atualizado iniciado e escutando...")
     application.run_polling()
 
 
