@@ -161,9 +161,15 @@ def gerar_dados_relatorio_diario(data_filtro):
         custo_inicial_total = df_estoque_dia['quantidade_inicial'].sum() * PRECO_FIXO_CUSTO
         custo_consumo_pessoal = df_consumo_dia['custo_total'].sum()
         lucro_margem = df_vendas_dia['lucro_venda'].sum()
-        resultado_do_dia = lucro_margem - custo_consumo_pessoal
+
+        # --- ALTERAÇÃO AQUI ---
+        custo_total_sobra = sum(sobras_dict.values()) * PRECO_FIXO_CUSTO
+        resultado_do_dia = lucro_margem - custo_consumo_pessoal - custo_total_sobra
+        # --- FIM DA ALTERAÇÃO ---
+
         resultado_final += f"  - Lucro das Vendas: `R$ {lucro_margem:.2f}`\n"
         resultado_final += f"  - Custo do Consumo: `R$ -{custo_consumo_pessoal:.2f}`\n"
+        resultado_final += f"  - Custo da Sobra: `R$ -{custo_total_sobra:.2f}`\n"
         resultado_final += "  --------------------------------\n"
         if resultado_do_dia >= 0:
             resultado_final += f"  - Resultado: *🚀 Lucro de R$ {resultado_do_dia:.2f}*"
@@ -338,7 +344,7 @@ async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not context.args or len(context.args) % 2 != 0:
-            await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor1] [qtd1]...`\nEx: `/estoque carne 20`")
+            await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor] [qtd]...`\nEx: `/estoque carne 20`")
             return
         hoje_str = pd.Timestamp.now(tz=TIMEZONE).strftime('%Y-%m-%d')
         await update.message.reply_text("Atualizando estoque do dia...")
@@ -501,7 +507,7 @@ async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             return
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
         df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
-        vendas_hoje = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
+        vendas_hoje = df_vendas[vendas_hoje['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
         consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
         df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
                                         ['data_hora', 'sabor', 'quantidade', 'custo_total'])
@@ -594,7 +600,7 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
             await update.message.reply_text("Nenhuma venda encontrada para gerar relatórios.")
             return
         df_periodo = df[(df['data_hora'].dt.tz_convert(TIMEZONE).dt.date >= data_inicio) & (
-                    df['data_hora'].dt.tz_convert(TIMEZONE).dt.date <= hoje)]
+                df['data_hora'].dt.tz_convert(TIMEZONE).dt.date <= hoje)]
         if df_periodo.empty:
             await update.message.reply_text(f"Nenhuma venda registrada nos últimos {dias} dias.")
             return
