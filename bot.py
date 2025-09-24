@@ -1,7 +1,13 @@
 import os
 import pandas as pd
-from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    CallbackQueryHandler,
+)
 import pickle
 import json
 import base64
@@ -23,7 +29,7 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 DRIVE_VENDAS_FILE = "vendas_pasteis.csv"
 DRIVE_ESTOQUE_FILE = "estoque_diario.csv"
 DRIVE_CONSUMO_FILE = "consumo_pessoal.csv"
-DRIVE_RELATORIOS_FILE = "relatorios_fechamento.txt"  # NOVO ARQUIVO
+DRIVE_RELATORIOS_FILE = "relatorios_fechamento.txt"
 PRECO_FIXO_VENDA = 10.00
 PRECO_FIXO_CUSTO = 4.50
 SABORES_VALIDOS = ['carne', 'frango']
@@ -31,7 +37,10 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE ---
+# --- ESTADOS DA CONVERSA ---
+ASK_CARRYOVER = range(1)
+
+# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
 # ... (As funções get_drive_service, get_file_id, download_dataframe e upload_dataframe permanecem as mesmas)
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
@@ -119,7 +128,7 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
+# --- LÓGICA DE RELATÓRIO (sem alterações) ---
 def gerar_texto_relatorio_diario(data_filtro):
     # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
@@ -174,6 +183,7 @@ def gerar_texto_relatorio_diario(data_filtro):
 
 
 async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     if not TELEGRAM_CHAT_ID:
         print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
         return
@@ -185,8 +195,8 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # --- DEFINIÇÃO DOS COMANDOS ---
 
-# ----- FUNÇÃO ATUALIZADA -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (função sem alterações)
     user_name = update.effective_user.first_name
     help_text = (
         f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas v9.0!\n\n"
@@ -218,84 +228,133 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-# ----- NOVO COMANDO -----
-async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ----- NOVO COMANDO DE FECHAMENTO INTERATIVO -----
+async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
 
-        # 1. Gerar e enviar o relatório final do dia
+        # 1. Gerar e enviar o relatório final
         relatorio_final = gerar_texto_relatorio_diario(hoje)
         await update.message.reply_text(relatorio_final, parse_mode='Markdown')
 
         service = get_drive_service()
 
-        # 2. Salvar o relatório no arquivo de histórico
-        relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
-        conteudo_antigo = ""
-        if relatorios_fid:
-            request = service.files().get_media(fileId=relatorios_fid)
-            fh = io.BytesIO()
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while not done: status, done = downloader.next_chunk()
-            conteudo_antigo = fh.getvalue().decode('utf-8')
-
-        novo_conteudo = conteudo_antigo + "\n\n" + ("=" * 30) + "\n\n" + relatorio_final.replace('*',
-                                                                                                 '')  # Remove a formatação Markdown para o .txt
-        fh_upload = io.BytesIO(novo_conteudo.encode('utf-8'))
-        media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
-        upload_dataframe(service, None, DRIVE_RELATORIOS_FILE, relatorios_fid,
-                         DRIVE_FOLDER_ID)  # Reutiliza a função de upload de forma adaptada
-
-        # 3. Calcular sobras e preparar estoque de amanhã
-        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
-        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE,
-                                        get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID),
+        # 2. Calcular sobras para o próximo passo
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
         df_estoque_dia = df_estoque[df_estoque['data'].dt.date == hoje]
 
+        sobras = {}
         if not df_estoque_dia.empty:
-            df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE,
-                                           get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID),
-                                           ['data_hora', 'sabor', 'quantidade'])
+            vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
+            df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
             df_vendas_dia = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
-            df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE,
-                                            get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID),
+            consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
+            df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
                                             ['data_hora', 'sabor', 'quantidade'])
             df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
 
-            sobras_texto = []
             for sabor in SABORES_VALIDOS:
                 inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
                 vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
                 consumido = df_consumo_dia[df_consumo_dia['sabor'] == sabor]['quantidade'].sum()
                 sobra = inicial - vendido - consumido
-
                 if sobra > 0:
-                    sobras_texto.append(f"  - {sabor.capitalize()}: {int(sobra)} unidades")
-                    # Remove registro de amanhã para este sabor, se já existir
-                    df_estoque = df_estoque[~((df_estoque['data'] == amanha_str) & (df_estoque['sabor'] == sabor))]
-                    # Adiciona a sobra como estoque inicial de amanhã
-                    novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': sobra}])
-                    df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
+                    sobras[sabor] = sobra
 
-            upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE,
-                             get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID), DRIVE_FOLDER_ID)
-
-            if sobras_texto:
-                await update.message.reply_text(
-                    "Estoque que sobrou foi lançado para amanhã:\n" + "\n".join(sobras_texto))
-
-        await update.message.reply_text("✅ Fechamento concluído com sucesso!")
+        # 3. Perguntar ao usuário o que fazer com as sobras
+        if sobras:
+            context.user_data['sobras'] = sobras
+            context.user_data['relatorio_final'] = relatorio_final
+            sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items()])
+            keyboard = [
+                [
+                    InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
+                    InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no"),
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
+                reply_markup=reply_markup
+            )
+            return ASK_CARRYOVER
+        else:
+            await update.message.reply_text("Nenhuma sobra de estoque encontrada. Fechamento concluído!")
+            return ConversationHandler.END
 
     except Exception as e:
         print(
             f"--- ERRO INESPERADO EM fechamento_diario ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(f"🐛 Erro inesperado ao fechar o dia: {e}")
+        await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
+        return ConversationHandler.END
 
 
-# ... (Todas as outras funções como registrar_usuario, definir_estoque, registrar_venda, etc. permanecem as mesmas)
+async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+    sobras = context.user_data.get('sobras', {})
+    relatorio_final = context.user_data.get('relatorio_final', "Relatório indisponível.")
+
+    service = get_drive_service()
+
+    # Salva o relatório de fechamento no arquivo de histórico
+    relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
+    conteudo_antigo = ""
+    if relatorios_fid:
+        request = service.files().get_media(fileId=relatorios_fid)
+        fh_download = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh_download, request)
+        done = False
+        while not done: status, done = downloader.next_chunk()
+        conteudo_antigo = fh_download.getvalue().decode('utf-8')
+
+    novo_conteudo = conteudo_antigo + "\n\n" + ("=" * 30) + "\n\n" + relatorio_final.replace('*', '')
+    fh_upload = io.BytesIO(novo_conteudo.encode('utf-8'))
+    media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
+    file_metadata = {'name': DRIVE_RELATORIOS_FILE}
+    if relatorios_fid:
+        service.files().update(fileId=relatorios_fid, media_body=media).execute()
+    else:
+        if DRIVE_FOLDER_ID: file_metadata['parents'] = [DRIVE_FOLDER_ID]
+        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+    if choice == "carryover_yes" and sobras:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
+                                        ['data', 'sabor', 'quantidade_inicial'])
+
+        for sabor, quantidade in sobras.items():
+            # Remove qualquer registro pré-existente para o dia de amanhã e este sabor
+            df_estoque = df_estoque[
+                ~((df_estoque['data'].dt.strftime('%Y-%m-%d') == amanha_str) & (df_estoque['sabor'] == sabor))]
+            novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
+            df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
+
+        upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo e as sobras foram lançadas como estoque inicial para amanhã.")
+    else:
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo e as sobras foram descartadas.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancela a operação."""
+    await update.message.reply_text("Operação cancelada.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ... (As demais funções como registrar_usuario, definir_estoque, registrar_venda, etc. permanecem as mesmas)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
@@ -610,6 +669,17 @@ def main() -> None:
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
+    # Configura o ConversationHandler para o fechamento
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("fechamento", fechamento_diario)],
+        states={
+            ASK_CARRYOVER: [CallbackQueryHandler(handle_carryover_choice)]
+        },
+        fallbacks=[CommandHandler("cancelar", cancel)],
+    )
+    application.add_handler(conv_handler)
+
+    # Adiciona os outros comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("registrar", registrar_usuario))
     application.add_handler(CommandHandler("estoque", definir_estoque))
@@ -620,9 +690,8 @@ def main() -> None:
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
-    application.add_handler(CommandHandler("debugvars", debug_vars))
 
-    print("Bot Definitivo (v14) iniciado...")
+    print("Bot com Fechamento Interativo (v10) iniciado...")
     application.run_polling()
 
 
