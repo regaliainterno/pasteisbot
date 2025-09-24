@@ -38,8 +38,7 @@ TIMEZONE = 'America/Sao_Paulo'
 plt.switch_backend('Agg')
 ASK_CARRYOVER = range(1)
 
-# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
-# ... (código do get_drive_service, get_file_id, download_dataframe, upload_dataframe sem alterações)
+# --- FUNÇÕES DO GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
@@ -128,7 +127,6 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
 
 # --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_dados_relatorio_diario(data_filtro):
-    # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
     df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
@@ -173,7 +171,7 @@ def gerar_dados_relatorio_diario(data_filtro):
             resultado_final += f"  - Resultado: *📉 Prejuízo de R$ {-resultado_do_dia:.2f}*"
     else:
         resultado_final += "_Impossível calcular sem o estoque inicial._"
-    texto_final = f"{titulo}\n\n{resumo_financeiro}\n\n{gestao_estoque}\n\n{resultado_final}"
+    texto_final = f"{titulo_relatorio}\n\n{resumo_financeiro}\n\n{gestao_estoque}\n\n{resultado_final}"
     return {
         "texto": texto_final,
         "data": data_filtro.strftime('%Y-%m-%d'),
@@ -187,101 +185,18 @@ def gerar_dados_relatorio_diario(data_filtro):
     }
 
 
+async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not TELEGRAM_CHAT_ID:
+        print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
+        return
+    print(f"Executando relatório automático para o chat {TELEGRAM_CHAT_ID}...")
+    data_hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+    dados = gerar_dados_relatorio_diario(data_hoje)
+    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=dados['texto'], parse_mode='Markdown')
+
+
 # --- DEFINIÇÃO DOS COMANDOS ---
-
-async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-        await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
-        dados_relatorio = gerar_dados_relatorio_diario(hoje)
-        context.user_data['dados_fechamento'] = dados_relatorio
-        await update.message.reply_text(dados_relatorio['texto'], parse_mode='Markdown')
-        sobras = json.loads(dados_relatorio['sobras'])
-        if any(v > 0 for v in sobras.values()):
-            sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items() if q > 0])
-            keyboard = [[InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
-                         InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
-                reply_markup=reply_markup)
-            return ASK_CARRYOVER
-        else:
-            await update.message.reply_text("Nenhuma sobra de estoque encontrada. Salvando relatório...")
-            service = get_drive_service()
-            fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
-            colunas_fechamento = list(dados_relatorio.keys())[1:]
-            df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
-            novo_fechamento_df = pd.DataFrame([dados_relatorio])
-            novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
-            df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
-            upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
-            await update.message.reply_text("✅ Fechamento concluído e salvo no histórico CSV!")
-            return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
-        return ConversationHandler.END
-
-
-# ----- FUNÇÃO ATUALIZADA -----
-async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    dados_fechamento = context.user_data.get('dados_fechamento', {})
-    if not dados_fechamento:
-        await query.edit_message_text(text="Erro: dados do fechamento não encontrados. Tente novamente.")
-        return ConversationHandler.END
-
-    sobras = json.loads(dados_fechamento.get('sobras', '{}'))
-    service = get_drive_service()
-
-    # Salva o fechamento no CSV
-    fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
-    colunas_fechamento = list(dados_fechamento.keys())[1:]
-    df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
-    novo_fechamento_df = pd.DataFrame([dados_fechamento])
-    novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
-    df_fechamentos['data'] = pd.to_datetime(df_fechamentos['data']).dt.strftime('%Y-%m-%d')
-    df_fechamentos = df_fechamentos[~(df_fechamentos['data'] == dados_fechamento['data'])]
-    df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
-    upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
-
-    # Lida com o estoque do dia seguinte
-    amanha = pd.Timestamp.now(tz=TIMEZONE).date() + timedelta(days=1)
-    estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
-    df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid, ['data', 'sabor', 'quantidade_inicial'])
-
-    # Lógica para "Sim"
-    if choice == "carryover_yes" and sobras:
-        for sabor, quantidade in sobras.items():
-            if quantidade > 0:
-                df_estoque = df_estoque[~((df_estoque['data'].dt.date == amanha) & (df_estoque['sabor'] == sabor))]
-                novo_estoque = pd.DataFrame(
-                    [{'data': pd.Timestamp(amanha, tz='UTC'), 'sabor': sabor, 'quantidade_inicial': quantidade}])
-                df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
-        await query.edit_message_text(text="✅ Fechamento concluído! Relatório salvo e sobras lançadas para amanhã.")
-
-    # Lógica para "Não"
-    else:
-        sabores_com_sobra = [sabor for sabor, qtd in sobras.items() if qtd > 0]
-        if sabores_com_sobra:
-            # CORREÇÃO: Compara objetos de data diretamente
-            df_estoque = df_estoque[
-                ~((df_estoque['data'].dt.date == amanha) & (df_estoque['sabor'].isin(sabores_com_sobra)))]
-        await query.edit_message_text(text="✅ Fechamento concluído! Relatório salvo e sobras descartadas.")
-
-    upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-# ... (Todas as outras funções permanecem as mesmas)
-# (start, registrar_usuario, definir_estoque, registrar_venda, consumo_pessoal, relatorio_diario_handler,
-# ver_estoque_atual, gerar_grafico, relatorio_lucro_periodo, enviar_csv, cancel, post_init, main)
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (código do start)
     user_name = update.effective_user.first_name
     help_text = (
         f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão v11!\n\n"
@@ -313,6 +228,105 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
+async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
+        dados_relatorio = gerar_dados_relatorio_diario(hoje)
+        context.user_data['dados_fechamento'] = dados_relatorio
+        await update.message.reply_text(dados_relatorio['texto'], parse_mode='Markdown')
+        sobras = json.loads(dados_relatorio['sobras'])
+        if any(v > 0 for v in sobras.values()):
+            sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items() if q > 0])
+            keyboard = [[InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
+                         InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
+                reply_markup=reply_markup
+            )
+            return ASK_CARRYOVER
+        else:
+            await update.message.reply_text("Nenhuma sobra de estoque encontrada. Salvando relatório...")
+            service = get_drive_service()
+            fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
+            colunas_fechamento = list(dados_relatorio.keys())[1:]
+            df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
+            novo_fechamento_df = pd.DataFrame([dados_relatorio])
+            novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
+            df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
+            upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
+            await update.message.reply_text("✅ Fechamento concluído e salvo no histórico CSV!")
+            return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
+        return ConversationHandler.END
+
+
+async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+    dados_fechamento = context.user_data.get('dados_fechamento', {})
+    if not dados_fechamento:
+        await query.edit_message_text(text="Erro: dados do fechamento não encontrados. Tente novamente.")
+        return ConversationHandler.END
+    sobras = json.loads(dados_fechamento.get('sobras', '{}'))
+    service = get_drive_service()
+    fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
+    colunas_fechamento = list(dados_fechamento.keys())[1:]
+    df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
+    novo_fechamento_df = pd.DataFrame([dados_fechamento])
+    novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
+    df_fechamentos['data'] = pd.to_datetime(df_fechamentos['data']).dt.strftime('%Y-%m-%d')
+    df_fechamentos = df_fechamentos[~(df_fechamentos['data'] == dados_fechamento['data'])]
+    df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
+    upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
+    if choice == "carryover_yes" and sobras:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
+                                        ['data', 'sabor', 'quantidade_inicial'])
+        df_estoque['data'] = pd.to_datetime(df_estoque['data']).dt.strftime('%Y-%m-%d')
+        for sabor, quantidade in sobras.items():
+            if quantidade > 0:
+                df_estoque = df_estoque[~((df_estoque['data'] == amanha_str) & (df_estoque['sabor'] == sabor))]
+                novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
+                df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
+        upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo em CSV e as sobras foram lançadas para amanhã.")
+    else:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
+                                        ['data', 'sabor', 'quantidade_inicial'])
+        sabores_com_sobra = [sabor for sabor, qtd in sobras.items() if qtd > 0]
+        if sabores_com_sobra:
+            df_estoque = df_estoque[~((df_estoque['data'].dt.strftime('%Y-%m-%d') == amanha_str) & (
+                df_estoque['sabor'].isin(sabores_com_sobra)))]
+        upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo em CSV e as sobras foram descartadas.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ----- FUNÇÃO ADICIONADA -----
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancela a operação atual e finaliza a conversa."""
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.edit_message_text(text="Operação cancelada.")
+    else:
+        await update.message.reply_text("Nenhuma operação em andamento para cancelar.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# (outras funções de comando como registrar_usuario, definir_estoque, etc. continuam aqui)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
