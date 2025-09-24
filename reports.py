@@ -57,7 +57,7 @@ def gerar_dados_relatorio_diario(data_filtro):
             sobra = inicial - vendido - consumido
             sobras_dict[sabor] = int(sobra)
 
-    titulo = f"📊 *Fechamento do Dia: {data_filtro.strftime('%d/%m/%Y')}*"
+    titulo = f"📊 *Relatório do Dia: {data_filtro.strftime('%d/%m/%Y')}*"
     resumo_financeiro = (f"💰 *RESUMO FINANCEIRO*\n"
                          f"  - Faturamento Bruto: *R$ {faturamento_bruto:.2f}*\n"
                          f"  - Lucro (Margem das Vendas): *R$ {lucro_margem:.2f}*")
