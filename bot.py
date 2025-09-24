@@ -30,87 +30,77 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE (COM CORREÇÃO) ---
+# --- FUNÇÕES DO GOOGLE DRIVE ---
+# ... (As funções get_drive_service, get_file_id e upload_dataframe permanecem as mesmas)
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
-# ----- FUNÇÃO ATUALIZADA -----
 def get_drive_service():
-    creds = None
-    # No servidor, sempre tentamos carregar as credenciais a partir das variáveis de ambiente
-    if 'GOOGLE_TOKEN_BASE_64' in os.environ and 'GOOGLE_CREDENTIALS_JSON' in os.environ:
-        try:
-            google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
-            google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-
-            decoded_token = base64.b64decode(google_token_base_64)
-            creds = pickle.loads(decoded_token)
-
-            # Se o token estiver expirado, tenta usar o refresh token para renová-lo
-            if not creds.valid and creds.refresh_token:
-                print("Token do Google expirado. Tentando renovar...")
-                # ----- LINHA CORRIGIDA -----
-                # O método refresh precisa de um objeto Request() vazio para o transporte.
-                creds.refresh(Request())
-
-                # Opcional: Atualizar a variável de ambiente com o novo token seria o ideal,
-                # mas é complexo em ambientes como o Railway. A renovação em memória
-                # funcionará durante a vida útil do container.
-                print("Token renovado com sucesso.")
-
-        except Exception as e:
-            print(f"Erro ao processar credenciais do Google a partir das variáveis de ambiente: {e}")
-            raise ValueError(f"Erro ao processar credenciais: {e}")
-
-    # Fallback para execução local (usando arquivos)
-    elif os.path.exists('token.pickle'):
+    creds = None;
+    if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
+    if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
-
-    # Fluxo de autorização inicial para execução local
-    elif os.path.exists('credentials.json'):
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        creds = flow.run_local_server(port=0)
+        else:
+            if os.path.exists('credentials.json'):
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            else:
+                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
+                google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+                if google_token_base_64 and google_creds_json:
+                    try:
+                        decoded_token = base64.b64decode(google_token_base_64)
+                        creds = pickle.loads(decoded_token)
+                        if not creds.valid and creds.refresh_token:
+                            print("Token do Google expirado. Tentando renovar...")
+                            creds.refresh(Request())
+                            print("Token renovado com sucesso.")
+                    except Exception as e:
+                        print(f"Erro ao processar credenciais do Google: {e}")
+                        raise ValueError(f"Erro ao processar credenciais: {e}")
+                else:
+                    raise ValueError("Token ou credenciais não encontrados.")
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
-
-    else:
-        raise ValueError("Nenhuma credencial válida encontrada (variáveis de ambiente ou arquivos locais).")
-
     return build('drive', 'v3', credentials=creds)
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false"
+    query = f"name='{file_name}' and trashed=false";
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
     return files[0]['id'] if files else None
 
 
+# ----- FUNÇÃO ATUALIZADA -----
 def download_dataframe(service, file_name, file_id, default_cols):
     if not file_id:
         df = pd.DataFrame(columns=default_cols)
         if not df.empty or default_cols:
-            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
         return df
+
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
     while not done: status, done = downloader.next_chunk()
     fh.seek(0)
+
     try:
         df = pd.read_csv(fh)
         if df.empty:
             df = pd.DataFrame(columns=default_cols)
-            if default_cols: df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+            if default_cols: df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
             return df
-        df[df.columns[0]] = pd.to_datetime(df[df.columns[0]])
+
+        # CORREÇÃO: Força a interpretação da data como UTC, tornando-a "tz-aware"
+        df[df.columns[0]] = pd.to_datetime(df[df.columns[0]], utc=True)
+
         if file_name == DRIVE_VENDAS_FILE and 'lucro_venda' not in df.columns:
             df['custo_unidade'] = PRECO_FIXO_CUSTO
             df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * PRECO_FIXO_CUSTO)
@@ -118,7 +108,7 @@ def download_dataframe(service, file_name, file_id, default_cols):
     except (pd.errors.EmptyDataError, KeyError, IndexError):
         df = pd.DataFrame(columns=default_cols)
         if default_cols:
-            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]])
+            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
         return df
 
 
@@ -134,7 +124,7 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- DEFINIÇÃO DOS COMANDOS E LÓGICAS (sem alterações) ---
+# --- DEMAIS FUNÇÕES (sem alterações) ---
 # ... (Todas as outras funções como start, registrar_venda, consumo_pessoal, relatorios, graficos, etc., permanecem exatamente as mesmas)
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
@@ -355,11 +345,11 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
         if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
+            await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use `/estoque`.")
             return
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -375,7 +365,8 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
         estoque_atual = estoque_inicial - ja_vendido - ja_consumido
         if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Consumo não registrado! Estoque insuficiente: *{int(estoque_atual)}*.",
+                                            parse_mode='Markdown')
             return
         novo_consumo = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
@@ -383,7 +374,7 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
         upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
         await update.message.reply_text(
-            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
+            f'✅ Consumo pessoal registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
     except (ValueError, IndexError):
         await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
     except Exception as e:
@@ -562,14 +553,14 @@ def main() -> None:
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
+    application.add_handler(CommandHandler("diario", relatorio_diario_handler))  # NOME CORRIGIDO AQUI
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
     application.add_handler(CommandHandler("debugvars", debug_vars))
 
-    print("Bot Final (v13) iniciado...")
+    print("Bot Final (v12) iniciado e escutando...")
     application.run_polling()
 
 
