@@ -23,6 +23,7 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 DRIVE_VENDAS_FILE = "vendas_pasteis.csv"
 DRIVE_ESTOQUE_FILE = "estoque_diario.csv"
 DRIVE_CONSUMO_FILE = "consumo_pessoal.csv"
+DRIVE_RELATORIOS_FILE = "relatorios_fechamento.txt"  # NOVO ARQUIVO
 PRECO_FIXO_VENDA = 10.00
 PRECO_FIXO_CUSTO = 4.50
 SABORES_VALIDOS = ['carne', 'frango']
@@ -31,7 +32,7 @@ TIMEZONE = 'America/Sao_Paulo'
 plt.switch_backend('Agg')
 
 # --- FUNÇÕES DO GOOGLE DRIVE ---
-# ... (As funções get_drive_service, get_file_id e upload_dataframe permanecem as mesmas)
+# ... (As funções get_drive_service, get_file_id, download_dataframe e upload_dataframe permanecem as mesmas)
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
@@ -76,31 +77,25 @@ def get_file_id(service, file_name, folder_id):
     return files[0]['id'] if files else None
 
 
-# ----- FUNÇÃO ATUALIZADA -----
 def download_dataframe(service, file_name, file_id, default_cols):
     if not file_id:
         df = pd.DataFrame(columns=default_cols)
         if not df.empty or default_cols:
             df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
         return df
-
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
     while not done: status, done = downloader.next_chunk()
     fh.seek(0)
-
     try:
         df = pd.read_csv(fh)
         if df.empty:
             df = pd.DataFrame(columns=default_cols)
             if default_cols: df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
             return df
-
-        # CORREÇÃO: Força a interpretação da data como UTC, tornando-a "tz-aware"
         df[df.columns[0]] = pd.to_datetime(df[df.columns[0]], utc=True)
-
         if file_name == DRIVE_VENDAS_FILE and 'lucro_venda' not in df.columns:
             df['custo_unidade'] = PRECO_FIXO_CUSTO
             df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * PRECO_FIXO_CUSTO)
@@ -124,9 +119,9 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- DEMAIS FUNÇÕES (sem alterações) ---
-# ... (Todas as outras funções como start, registrar_venda, consumo_pessoal, relatorios, graficos, etc., permanecem exatamente as mesmas)
+# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
+    # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
     df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
@@ -188,52 +183,119 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=texto_relatorio, parse_mode='Markdown')
 
 
+# --- DEFINIÇÃO DOS COMANDOS ---
+
+# ----- FUNÇÃO ATUALIZADA -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
     help_text = (
-        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas.\n\n"
-        "Aqui está a lista de todos os comandos disponíveis:\n\n"
+        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas v9.0!\n\n"
+        "**COMANDO DE FIM DE EXPEDIENTE**\n"
+        "*/fechamento*\n"
+        "_Gera o relatório final, salva o histórico e prepara o estoque para o dia seguinte. Use este comando todo dia ao encerrar as atividades._\n\n"
         "**GESTÃO DIÁRIA**\n"
         "*/estoque [sabor] [qtd]...*\n"
-        "Define o estoque inicial do dia. _Ex: /estoque carne 20 frango 15_\n\n"
+        "Define (ou adiciona a) o estoque inicial do dia.\n"
         "*/venda [sabor] [qtd]*\n"
-        "Registra uma venda e dá baixa no estoque. _Ex: /venda carne 2_\n\n"
+        "Registra uma venda.\n"
         "*/consumo [sabor] [qtd]*\n"
-        "Registra um consumo pessoal (custo). _Ex: /consumo frango 1_\n\n"
+        "Registra um consumo pessoal.\n"
         "*/ver_estoque*\n"
-        "Mostra uma consulta rápida do estoque atual.\n\n"
+        "Consulta rápida do estoque atual.\n\n"
         "**RELATÓRIOS E ANÁLISE**\n"
         "*/diario*\n"
-        "Gera o relatório completo de hoje (vendas, estoque, resultado).\n\n"
-        "*/diario AAAA-MM-DD*\n"
-        "Gera o relatório para uma data específica. _Ex: /diario 2025-09-22_\n\n"
+        "Relatório completo de hoje.\n"
         "*/lucro [dias]*\n"
-        "Mostra o lucro acumulado nos últimos dias. _Ex: /lucro 7_\n\n"
+        "Lucro acumulado nos últimos dias.\n"
         "*/grafico [dias]*\n"
-        "Gera um gráfico de desempenho do lucro. _Ex: /grafico 7_\n\n"
+        "Gera um gráfico de desempenho do lucro.\n"
         "*/vendas*\n"
-        "Envia o arquivo `.csv` com o histórico completo de vendas.\n\n"
+        "Envia o arquivo `.csv` com o histórico de vendas.\n\n"
         "**CONFIGURAÇÃO**\n"
         "*/registrar*\n"
-        "Mostra seu ID de chat para ativar os relatórios automáticos.\n\n"
-        "*/debugvars* - _(Para diagnóstico de problemas)_"
+        "Ativa os relatórios automáticos."
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-async def debug_vars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    creds_json_val = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    token_b64_val = os.environ.get("GOOGLE_TOKEN_BASE_64")
-    message = "--- Status das Variáveis de Ambiente no Servidor ---\n\n"
-    message += f"GOOGLE_CREDENTIALS_JSON:\n"
-    message += f"  - Definida: {'Sim' if creds_json_val else 'NÃO'}\n"
-    message += f"  - Tamanho: {len(creds_json_val) if creds_json_val else 0} caracteres\n\n"
-    message += f"GOOGLE_TOKEN_BASE_64:\n"
-    message += f"  - Definida: {'Sim' if token_b64_val else 'NÃO'}\n"
-    message += f"  - Tamanho: {len(token_b64_val) if token_b64_val else 0} caracteres"
-    await update.message.reply_text(f"<pre>{message}</pre>", parse_mode='HTML')
+# ----- NOVO COMANDO -----
+async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
+
+        # 1. Gerar e enviar o relatório final do dia
+        relatorio_final = gerar_texto_relatorio_diario(hoje)
+        await update.message.reply_text(relatorio_final, parse_mode='Markdown')
+
+        service = get_drive_service()
+
+        # 2. Salvar o relatório no arquivo de histórico
+        relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
+        conteudo_antigo = ""
+        if relatorios_fid:
+            request = service.files().get_media(fileId=relatorios_fid)
+            fh = io.BytesIO()
+            downloader = MediaIoBaseDownload(fh, request)
+            done = False
+            while not done: status, done = downloader.next_chunk()
+            conteudo_antigo = fh.getvalue().decode('utf-8')
+
+        novo_conteudo = conteudo_antigo + "\n\n" + ("=" * 30) + "\n\n" + relatorio_final.replace('*',
+                                                                                                 '')  # Remove a formatação Markdown para o .txt
+        fh_upload = io.BytesIO(novo_conteudo.encode('utf-8'))
+        media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
+        upload_dataframe(service, None, DRIVE_RELATORIOS_FILE, relatorios_fid,
+                         DRIVE_FOLDER_ID)  # Reutiliza a função de upload de forma adaptada
+
+        # 3. Calcular sobras e preparar estoque de amanhã
+        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE,
+                                        get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID),
+                                        ['data', 'sabor', 'quantidade_inicial'])
+        df_estoque_dia = df_estoque[df_estoque['data'].dt.date == hoje]
+
+        if not df_estoque_dia.empty:
+            df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE,
+                                           get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID),
+                                           ['data_hora', 'sabor', 'quantidade'])
+            df_vendas_dia = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
+            df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE,
+                                            get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID),
+                                            ['data_hora', 'sabor', 'quantidade'])
+            df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
+
+            sobras_texto = []
+            for sabor in SABORES_VALIDOS:
+                inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
+                vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
+                consumido = df_consumo_dia[df_consumo_dia['sabor'] == sabor]['quantidade'].sum()
+                sobra = inicial - vendido - consumido
+
+                if sobra > 0:
+                    sobras_texto.append(f"  - {sabor.capitalize()}: {int(sobra)} unidades")
+                    # Remove registro de amanhã para este sabor, se já existir
+                    df_estoque = df_estoque[~((df_estoque['data'] == amanha_str) & (df_estoque['sabor'] == sabor))]
+                    # Adiciona a sobra como estoque inicial de amanhã
+                    novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': sobra}])
+                    df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
+
+            upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE,
+                             get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID), DRIVE_FOLDER_ID)
+
+            if sobras_texto:
+                await update.message.reply_text(
+                    "Estoque que sobrou foi lançado para amanhã:\n" + "\n".join(sobras_texto))
+
+        await update.message.reply_text("✅ Fechamento concluído com sucesso!")
+
+    except Exception as e:
+        print(
+            f"--- ERRO INESPERADO EM fechamento_diario ---\n{traceback.format_exc()}\n----------------------------------------")
+        await update.message.reply_text(f"🐛 Erro inesperado ao fechar o dia: {e}")
 
 
+# ... (Todas as outras funções como registrar_usuario, definir_estoque, registrar_venda, etc. permanecem as mesmas)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
@@ -553,14 +615,14 @@ def main() -> None:
     application.add_handler(CommandHandler("estoque", definir_estoque))
     application.add_handler(CommandHandler("venda", registrar_venda))
     application.add_handler(CommandHandler("consumo", consumo_pessoal))
-    application.add_handler(CommandHandler("diario", relatorio_diario_handler))  # NOME CORRIGIDO AQUI
+    application.add_handler(CommandHandler("diario", relatorio_diario_handler))
     application.add_handler(CommandHandler("lucro", relatorio_lucro_periodo))
     application.add_handler(CommandHandler("vendas", enviar_csv))
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
     application.add_handler(CommandHandler("debugvars", debug_vars))
 
-    print("Bot Final (v12) iniciado e escutando...")
+    print("Bot Definitivo (v14) iniciado...")
     application.run_polling()
 
 
