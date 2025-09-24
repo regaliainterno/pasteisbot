@@ -1,4 +1,11 @@
 # main.py
+
+"""
+Arquivo principal de inicialização do PasteisBot.
+
+Responsável por registrar handlers, iniciar o agendador de tarefas e rodar o bot.
+"""
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -11,12 +18,13 @@ import config
 import handlers
 from reports import gerar_dados_relatorio_diario
 
-
 async def post_init(application: Application) -> None:
-    """Função para iniciar o agendador após o bot ligar."""
+    """
+    Função para iniciar o agendador após o bot ligar.
+    Envia relatório automático para o chat configurado.
+    """
     scheduler = AsyncIOScheduler(timezone=config.TIMEZONE)
 
-    # Precisamos de uma função wrapper para chamar a função assíncrona
     async def job():
         if not config.TELEGRAM_CHAT_ID:
             print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
@@ -30,14 +38,10 @@ async def post_init(application: Application) -> None:
     scheduler.start()
     print("Agendador de tarefas iniciado e configurado para 19:30.")
 
-
-def main() -> None:
-    """Inicia o bot e registra todos os handlers."""
-    if not config.TELEGRAM_TOKEN:
-        raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
-
-    application = Application.builder().token(config.TELEGRAM_TOKEN).post_init(post_init).build()
-
+def register_handlers(application):
+    """
+    Registra todos os handlers do bot.
+    """
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("fechamento", handlers.fechamento_diario)],
         states={
@@ -58,9 +62,19 @@ def main() -> None:
     application.add_handler(CommandHandler("ver_estoque", handlers.ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", handlers.gerar_grafico))
 
+def main() -> None:
+    """
+    Inicia o bot e registra todos os handlers.
+    """
+    if not config.TELEGRAM_TOKEN:
+        raise ValueError("ERRO: Variável de ambiente TELEGRAM_TOKEN não configurada.")
+
+    application = Application.builder().token(config.TELEGRAM_TOKEN).post_init(post_init).build()
+
+    register_handlers(application)
+
     print("Bot Modular (v13) iniciado...")
     application.run_polling()
-
 
 if __name__ == '__main__':
     main()

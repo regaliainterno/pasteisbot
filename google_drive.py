@@ -1,4 +1,11 @@
 # google_drive.py
+
+"""
+Funções para integração com Google Drive usando API oficial.
+
+Inclui autenticação, download/upload de DataFrames e utilitários para manipulação de arquivos no Drive.
+"""
+
 import os
 import pandas as pd
 import pickle
@@ -15,13 +22,23 @@ import config  # Importa nossas configurações
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
+def _empty_dataframe(columns):
+    """Cria um DataFrame vazio com as colunas especificadas, já convertendo a primeira para datetime se aplicável."""
+    df = pd.DataFrame(columns=columns)
+    if columns:
+        df[columns[0]] = pd.to_datetime(df[columns[0]], utc=True)
+    return df
 
 def get_drive_service():
+    """
+    Autentica e retorna um serviço da Google Drive API, utilizando credenciais locais ou variáveis de ambiente.
+    """
     creds = None
     if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
 
+    # Renova ou obtém credenciais, de acordo com o ambiente (Railway ou local)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
@@ -51,21 +68,23 @@ def get_drive_service():
 
     return build('drive', 'v3', credentials=creds)
 
-
 def get_file_id(service, file_name, folder_id):
+    """
+    Retorna o ID do arquivo no Drive pelo nome e pasta.
+    """
     query = f"name='{file_name}' and trashed=false"
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
     return files[0]['id'] if files else None
 
-
 def download_dataframe(service, file_name, file_id, default_cols):
+    """
+    Baixa um arquivo CSV do Drive e retorna como DataFrame.
+    Se não existir, retorna DataFrame vazio com as colunas padrão.
+    """
     if not file_id:
-        df = pd.DataFrame(columns=default_cols)
-        if default_cols:
-            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
-        return df
+        return _empty_dataframe(default_cols)
 
     request = service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
@@ -77,24 +96,19 @@ def download_dataframe(service, file_name, file_id, default_cols):
     try:
         df = pd.read_csv(fh)
         if df.empty:
-            df = pd.DataFrame(columns=default_cols)
-            if default_cols: df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
-            return df
-
+            return _empty_dataframe(default_cols)
         df[df.columns[0]] = pd.to_datetime(df[df.columns[0]], utc=True)
-
         if file_name == config.DRIVE_VENDAS_FILE and 'lucro_venda' not in df.columns:
             df['custo_unidade'] = config.PRECO_FIXO_CUSTO
             df['lucro_venda'] = df['total_venda'] - (df['quantidade'] * config.PRECO_FIXO_CUSTO)
         return df
     except (pd.errors.EmptyDataError, KeyError, IndexError):
-        df = pd.DataFrame(columns=default_cols)
-        if default_cols:
-            df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
-        return df
-
+        return _empty_dataframe(default_cols)
 
 def upload_dataframe(service, df, file_name, file_id, folder_id):
+    """
+    Envia um DataFrame para o Drive, sobrescrevendo ou criando o arquivo.
+    """
     csv_bytes = df.to_csv(index=False).encode('utf-8')
     fh = io.BytesIO(csv_bytes)
     media = MediaIoBaseUpload(fh, mimetype='text/csv', resumable=True)

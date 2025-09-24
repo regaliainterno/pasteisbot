@@ -1,4 +1,10 @@
 # handlers.py
+
+"""
+Handlers para comandos do PasteisBot via Telegram.
+Cada função responde a um comando específico do usuário.
+"""
+
 import pandas as pd
 from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
@@ -11,8 +17,10 @@ import config
 import google_drive as drive
 import reports
 
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Mensagem inicial de boas-vindas e ajuda.
+    """
     user_name = update.effective_user.first_name
     help_text = (
         f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão v12 (Modular)!\n\n"
@@ -43,16 +51,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
-
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Registra o chat para automação.
+    """
     chat_id = update.effective_chat.id
     await update.message.reply_text(
         f"✅ Chat registrado.\n\n"
         f"Para relatórios automáticos, adicione a variável `TELEGRAM_CHAT_ID` no Railway com este valor:\n`{chat_id}`"
     )
 
-
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Define o estoque inicial do dia para os sabores indicados.
+    Exemplo: /estoque carne 20 frango 30
+    """
     try:
         if not context.args or len(context.args) % 2 != 0:
             await update.message.reply_text("❌ Erro! Formato: `/estoque [sabor1] [qtd1]...`")
@@ -86,8 +99,11 @@ async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         await update.message.reply_text(f"🐛 Erro inesperado ao definir estoque: {e}")
 
-
 async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Registra uma venda de pastel.
+    Exemplo: /venda carne 3
+    """
     try:
         if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
@@ -157,8 +173,11 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"--- ERRO INESPERADO EM registrar_venda ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
-
 async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Registra consumo pessoal de pastel.
+    Exemplo: /consumo frango 2
+    """
     try:
         if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
@@ -222,8 +241,11 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
-
 async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Gera o relatório diário de vendas, estoque e consumo.
+    Exemplo: /diario
+    """
     try:
         if context.args:
             data_filtro = pd.to_datetime(context.args[0]).date()
@@ -235,8 +257,11 @@ async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT
     except Exception as e:
         await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
-
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Mostra o estoque atual dos sabores no dia.
+    Exemplo: /ver_estoque
+    """
     try:
         hoje = pd.Timestamp.now(tz=config.TIMEZONE).date()
         service = drive.get_drive_service()
@@ -283,8 +308,11 @@ async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             f"--- ERRO INESPERADO EM ver_estoque_atual ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro ao verificar estoque: {e}")
 
-
 async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Gera e envia o gráfico de lucro dos últimos N dias.
+    Exemplo: /grafico 7
+    """
     try:
         if not context.args or not context.args[0].isdigit():
             await update.message.reply_text("❌ Erro! Formato: `/grafico [dias]`")
@@ -305,8 +333,11 @@ async def gerar_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"--- ERRO INESPERADO EM gerar_grafico ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro ao gerar gráfico: {e}")
 
-
 async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Envia o relatório de lucro dos últimos N dias.
+    Exemplo: /lucro 7
+    """
     try:
         if not context.args or not context.args[0].isdigit():
             await update.message.reply_text("❌ Erro! Formato: `/lucro [dias]`")
@@ -342,8 +373,11 @@ async def relatorio_lucro_periodo(update: Update, context: ContextTypes.DEFAULT_
     except Exception as e:
         await update.message.reply_text(f"Erro ao gerar relatório de período: {e}")
 
-
 async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Envia o arquivo CSV de vendas completo.
+    Exemplo: /vendas
+    """
     try:
         await update.message.reply_text("Buscando o arquivo de vendas no Drive...")
         service = drive.get_drive_service()
@@ -354,7 +388,7 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
         request = service.files().get_media(fileId=vendas_fid)
         fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
+        downloader = drive.MediaIoBaseDownload(fh, request)
         done = False
         while not done: status, done = downloader.next_chunk()
         fh.seek(0)
@@ -363,8 +397,11 @@ async def enviar_csv(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     except Exception as e:
         await update.message.reply_text(f"Ocorreu um erro ao enviar o arquivo: {e}")
 
-
 async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Inicia o fluxo de fechamento diário, mostrando relatório e perguntando sobre sobras.
+    Exemplo: /fechamento
+    """
     try:
         hoje = pd.Timestamp.now(tz=config.TIMEZONE).date()
         await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
@@ -400,8 +437,10 @@ async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
         return ConversationHandler.END
 
-
 async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Handler para escolha de lançar ou descartar sobras como estoque inicial do próximo dia.
+    """
     query = update.callback_query
     await query.answer()
     choice = query.data
@@ -448,8 +487,11 @@ async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_
     context.user_data.clear()
     return ConversationHandler.END
 
-
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Cancela qualquer operação em andamento.
+    Exemplo: /cancelar
+    """
     if update.callback_query:
         await update.callback_query.answer()
         await update.callback_query.edit_message_text(text="Operação cancelada.")

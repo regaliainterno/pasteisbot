@@ -1,5 +1,16 @@
 # config.py
+
+"""
+Configurações e constantes globais do PasteisBot.
+
+Este módulo centraliza todas as variáveis de ambiente, nomes de arquivos e constantes do negócio.
+Qualquer ajuste de sabores, preços ou arquivos deve ser feito aqui.
+
+Sugestão: Para adicionar novos sabores, basta atualizar SABORES_VALIDOS.
+"""
+
 import os
+from enum import Enum
 
 # --- CONFIGURAÇÕES DE AMBIENTE ---
 # Lê as "senhas" das variáveis de ambiente do Railway
@@ -16,8 +27,15 @@ DRIVE_FECHAMENTOS_FILE = "historico_fechamentos.csv"
 # --- CONFIGURAÇÕES DO NEGÓCIO ---
 PRECO_FIXO_VENDA = 10.00
 PRECO_FIXO_CUSTO = 4.50
+
+# Para adicionar novos sabores, basta incluir na lista abaixo!
 SABORES_VALIDOS = ['carne', 'frango']
+
 TIMEZONE = 'America/Sao_Paulo'
 
 # --- ESTADOS DA CONVERSA (para o comando /fechamento) ---
+class ConversaEstado(Enum):
+    ASK_CARRYOVER = 1
+
+# Mantém compatibilidade com ConversationHandler do Telegram
 ASK_CARRYOVER = range(1)

@@ -1,4 +1,9 @@
 # reports.py
+
+"""
+Funções para geração de relatórios financeiros, de estoque e gráficos para o PasteisBot.
+"""
+
 import pandas as pd
 import json
 from datetime import datetime, timedelta
@@ -8,10 +13,13 @@ import io
 import config
 import google_drive as drive
 
-
 def gerar_dados_relatorio_diario(data_filtro):
+    """
+    Gera o relatório do dia especificado, retornando um dicionário com métricas e texto formatado.
+    """
     service = drive.get_drive_service()
 
+    # Carrega vendas, estoque e consumo do dia
     vendas_fid = drive.get_file_id(service, config.DRIVE_VENDAS_FILE, config.DRIVE_FOLDER_ID)
     df_vendas = drive.download_dataframe(service, config.DRIVE_VENDAS_FILE, vendas_fid,
                                          ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade',
@@ -88,8 +96,11 @@ def gerar_dados_relatorio_diario(data_filtro):
         "sobras": json.dumps(sobras_dict)
     }
 
-
 def gerar_grafico_lucro(dias):
+    """
+    Gera o gráfico de lucro dos últimos N dias.
+    Retorna o buffer da imagem e texto de legenda.
+    """
     service = drive.get_drive_service()
     vendas_fid = drive.get_file_id(service, config.DRIVE_VENDAS_FILE, config.DRIVE_FOLDER_ID)
     df_vendas = drive.download_dataframe(service, config.DRIVE_VENDAS_FILE, vendas_fid,
@@ -126,7 +137,7 @@ def gerar_grafico_lucro(dias):
     ax.set_xlabel('Data', fontsize=12)
     ax.tick_params(axis='x', rotation=45)
     ax.grid(axis='y', linestyle='--', alpha=0.7)
-    ax.spines['top'].set_visible(False);
+    ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.legend()
     ax.set_xticklabels([d.strftime('%d/%m') for d in lucro_por_dia.index])
@@ -134,8 +145,8 @@ def gerar_grafico_lucro(dias):
 
     plt.tight_layout()
     buf = io.BytesIO()
-    plt.savefig(buf, format='png');
-    buf.seek(0);
+    plt.savefig(buf, format='png')
+    buf.seek(0)
     plt.close(fig)
 
     total_lucro = lucro_por_dia.sum()
