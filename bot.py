@@ -40,46 +40,50 @@ plt.switch_backend('Agg')
 # --- ESTADOS DA CONVERSA ---
 ASK_CARRYOVER = range(1)
 
-# --- FUNÇÕES DO GOOGLE DRIVE (sem alterações) ---
-# ... (As funções get_drive_service, get_file_id, download_dataframe e upload_dataframe permanecem as mesmas)
+# --- FUNÇÕES DO GOOGLE DRIVE ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():
-    creds = None;
-    if os.path.exists('token.pickle'):
+    creds = None
+    # No servidor, sempre tentamos carregar as credenciais a partir das variáveis de ambiente
+    if 'GOOGLE_TOKEN_BASE_64' in os.environ and 'GOOGLE_CREDENTIALS_JSON' in os.environ:
+        try:
+            google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
+            decoded_token = base64.b64decode(google_token_base_64)
+            creds = pickle.loads(decoded_token)
+
+            if not creds.valid and creds.refresh_token:
+                print("Token do Google expirado. Tentando renovar...")
+                creds.refresh(Request())
+                print("Token renovado com sucesso.")
+        except Exception as e:
+            print(f"Erro ao processar credenciais do Google a partir das variáveis de ambiente: {e}")
+            raise ValueError(f"Erro ao processar credenciais: {e}")
+
+    # Fallback para execução local (usando arquivos)
+    elif os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
-    if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        else:
-            if os.path.exists('credentials.json'):
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-            else:
-                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
-                google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-                if google_token_base_64 and google_creds_json:
-                    try:
-                        decoded_token = base64.b64decode(google_token_base_64)
-                        creds = pickle.loads(decoded_token)
-                        if not creds.valid and creds.refresh_token:
-                            print("Token do Google expirado. Tentando renovar...")
-                            creds.refresh(Request())
-                            print("Token renovado com sucesso.")
-                    except Exception as e:
-                        print(f"Erro ao processar credenciais do Google: {e}")
-                        raise ValueError(f"Erro ao processar credenciais: {e}")
-                else:
-                    raise ValueError("Token ou credenciais não encontrados.")
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+
+    elif os.path.exists('credentials.json'):
+        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+        creds = flow.run_local_server(port=0)
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
+
+    else:
+        raise ValueError("Nenhuma credencial válida encontrada (variáveis de ambiente ou arquivos locais).")
+
     return build('drive', 'v3', credentials=creds)
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false";
+    query = f"name='{file_name}' and trashed=false"
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
@@ -89,7 +93,7 @@ def get_file_id(service, file_name, folder_id):
 def download_dataframe(service, file_name, file_id, default_cols):
     if not file_id:
         df = pd.DataFrame(columns=default_cols)
-        if not df.empty or default_cols:
+        if default_cols:
             df[default_cols[0]] = pd.to_datetime(df[default_cols[0]], utc=True)
         return df
     request = service.files().get_media(fileId=file_id)
@@ -128,7 +132,30 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-# --- LÓGICA DE RELATÓRIO (sem alterações) ---
+def append_text_to_drive_file(service, content_to_append, file_name, file_id, folder_id):
+    """Função para adicionar texto a um arquivo no Drive."""
+    request = service.files().get_media(fileId=file_id) if file_id else None
+    fh = io.BytesIO()
+    if request:
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            status, done = downloader.next_chunk()
+
+    old_content = fh.getvalue().decode('utf-8')
+    new_content = old_content + content_to_append
+
+    fh_upload = io.BytesIO(new_content.encode('utf-8'))
+    media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
+    file_metadata = {'name': file_name}
+    if file_id:
+        service.files().update(fileId=file_id, media_body=media).execute()
+    else:
+        if folder_id: file_metadata['parents'] = [folder_id]
+        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+
+
+# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
 def gerar_texto_relatorio_diario(data_filtro):
     # (Esta função permanece a mesma da versão anterior)
     service = get_drive_service()
@@ -183,7 +210,6 @@ def gerar_texto_relatorio_diario(data_filtro):
 
 
 async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     if not TELEGRAM_CHAT_ID:
         print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
         return
@@ -194,15 +220,13 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # (função sem alterações)
     user_name = update.effective_user.first_name
     help_text = (
-        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas v9.0!\n\n"
+        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão v10!\n\n"
         "**COMANDO DE FIM DE EXPEDIENTE**\n"
         "*/fechamento*\n"
-        "_Gera o relatório final, salva o histórico e prepara o estoque para o dia seguinte. Use este comando todo dia ao encerrar as atividades._\n\n"
+        "_Gera o relatório final, salva o histórico e pergunta se deseja virar o estoque para o dia seguinte._\n\n"
         "**GESTÃO DIÁRIA**\n"
         "*/estoque [sabor] [qtd]...*\n"
         "Define (ou adiciona a) o estoque inicial do dia.\n"
@@ -228,19 +252,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-# ----- NOVO COMANDO DE FECHAMENTO INTERATIVO -----
 async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
 
-        # 1. Gerar e enviar o relatório final
         relatorio_final = gerar_texto_relatorio_diario(hoje)
         await update.message.reply_text(relatorio_final, parse_mode='Markdown')
 
         service = get_drive_service()
 
-        # 2. Calcular sobras para o próximo passo
+        # Salva o relatório no arquivo de histórico
+        relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
+        texto_para_salvar = "\n\n" + (
+                    "=" * 30) + f"\n\nFECHAMENTO DE {hoje.strftime('%d/%m/%Y')}\n\n" + relatorio_final.replace('*', '')
+        append_text_to_drive_file(service, texto_para_salvar, DRIVE_RELATORIOS_FILE, relatorios_fid, DRIVE_FOLDER_ID)
+
+        # Calcula sobras
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
         df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
                                         ['data', 'sabor', 'quantidade_inicial'])
@@ -255,7 +283,6 @@ async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
                                             ['data_hora', 'sabor', 'quantidade'])
             df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
-
             for sabor in SABORES_VALIDOS:
                 inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
                 vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
@@ -264,30 +291,21 @@ async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 if sobra > 0:
                     sobras[sabor] = sobra
 
-        # 3. Perguntar ao usuário o que fazer com as sobras
         if sobras:
             context.user_data['sobras'] = sobras
-            context.user_data['relatorio_final'] = relatorio_final
             sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items()])
-            keyboard = [
-                [
-                    InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
-                    InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no"),
-                ]
-            ]
+            keyboard = [[InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
+                         InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
                 f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
-                reply_markup=reply_markup
-            )
+                reply_markup=reply_markup)
             return ASK_CARRYOVER
         else:
             await update.message.reply_text("Nenhuma sobra de estoque encontrada. Fechamento concluído!")
             return ConversationHandler.END
 
     except Exception as e:
-        print(
-            f"--- ERRO INESPERADO EM fechamento_diario ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
         return ConversationHandler.END
 
@@ -297,32 +315,9 @@ async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
     choice = query.data
     sobras = context.user_data.get('sobras', {})
-    relatorio_final = context.user_data.get('relatorio_final', "Relatório indisponível.")
-
-    service = get_drive_service()
-
-    # Salva o relatório de fechamento no arquivo de histórico
-    relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
-    conteudo_antigo = ""
-    if relatorios_fid:
-        request = service.files().get_media(fileId=relatorios_fid)
-        fh_download = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh_download, request)
-        done = False
-        while not done: status, done = downloader.next_chunk()
-        conteudo_antigo = fh_download.getvalue().decode('utf-8')
-
-    novo_conteudo = conteudo_antigo + "\n\n" + ("=" * 30) + "\n\n" + relatorio_final.replace('*', '')
-    fh_upload = io.BytesIO(novo_conteudo.encode('utf-8'))
-    media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
-    file_metadata = {'name': DRIVE_RELATORIOS_FILE}
-    if relatorios_fid:
-        service.files().update(fileId=relatorios_fid, media_body=media).execute()
-    else:
-        if DRIVE_FOLDER_ID: file_metadata['parents'] = [DRIVE_FOLDER_ID]
-        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
     if choice == "carryover_yes" and sobras:
+        service = get_drive_service()
         hoje = pd.Timestamp.now(tz=TIMEZONE).date()
         amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
         estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
@@ -330,7 +325,6 @@ async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_
                                         ['data', 'sabor', 'quantidade_inicial'])
 
         for sabor, quantidade in sobras.items():
-            # Remove qualquer registro pré-existente para o dia de amanhã e este sabor
             df_estoque = df_estoque[
                 ~((df_estoque['data'].dt.strftime('%Y-%m-%d') == amanha_str) & (df_estoque['sabor'] == sabor))]
             novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
@@ -348,13 +342,12 @@ async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancela a operação."""
-    await update.message.reply_text("Operação cancelada.")
+    await update.message.reply_text("Operação de fechamento cancelada.")
     context.user_data.clear()
     return ConversationHandler.END
 
 
-# ... (As demais funções como registrar_usuario, definir_estoque, registrar_venda, etc. permanecem as mesmas)
+# ... (outras funções de comando como registrar_usuario, definir_estoque, etc. continuam aqui)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
