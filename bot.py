@@ -30,39 +30,57 @@ TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
 
-# --- FUNÇÕES DO GOOGLE DRIVE ---
+# --- FUNÇÕES DO GOOGLE DRIVE (COM CORREÇÃO) ---
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
+# ----- FUNÇÃO ATUALIZADA -----
 def get_drive_service():
     creds = None
-    if os.path.exists('token.pickle'):
+    # No servidor, sempre tentamos carregar as credenciais a partir das variáveis de ambiente
+    if 'GOOGLE_TOKEN_BASE_64' in os.environ and 'GOOGLE_CREDENTIALS_JSON' in os.environ:
+        try:
+            google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
+            google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+
+            decoded_token = base64.b64decode(google_token_base_64)
+            creds = pickle.loads(decoded_token)
+
+            # Se o token estiver expirado, tenta usar o refresh token para renová-lo
+            if not creds.valid and creds.refresh_token:
+                print("Token do Google expirado. Tentando renovar...")
+                # ----- LINHA CORRIGIDA -----
+                # O método refresh precisa de um objeto Request() vazio para o transporte.
+                creds.refresh(Request())
+
+                # Opcional: Atualizar a variável de ambiente com o novo token seria o ideal,
+                # mas é complexo em ambientes como o Railway. A renovação em memória
+                # funcionará durante a vida útil do container.
+                print("Token renovado com sucesso.")
+
+        except Exception as e:
+            print(f"Erro ao processar credenciais do Google a partir das variáveis de ambiente: {e}")
+            raise ValueError(f"Erro ao processar credenciais: {e}")
+
+    # Fallback para execução local (usando arquivos)
+    elif os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
-    if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-        else:
-            if os.path.exists('credentials.json'):
-                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-                creds = flow.run_local_server(port=0)
-            else:
-                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
-                google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
-                if google_token_base_64 and google_creds_json:
-                    try:
-                        decoded_token = base64.b64decode(google_token_base_64)
-                        creds = pickle.loads(decoded_token)
-                        if not creds.valid and creds.refresh_token:
-                            creds_info = json.loads(google_creds_json)
-                            creds.refresh(Request(creds_info.get('installed')))
-                    except Exception as e:
-                        print(f"Erro ao processar credenciais do Google: {e}")
-                        raise ValueError(f"Erro ao processar credenciais: {e}")
-                else:
-                    raise ValueError("Token ou credenciais não encontrados.")
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+
+    # Fluxo de autorização inicial para execução local
+    elif os.path.exists('credentials.json'):
+        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+        creds = flow.run_local_server(port=0)
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
+
+    else:
+        raise ValueError("Nenhuma credencial válida encontrada (variáveis de ambiente ou arquivos locais).")
+
     return build('drive', 'v3', credentials=creds)
 
 
@@ -116,6 +134,8 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
+# --- DEFINIÇÃO DOS COMANDOS E LÓGICAS (sem alterações) ---
+# ... (Todas as outras funções como start, registrar_venda, consumo_pessoal, relatorios, graficos, etc., permanecem exatamente as mesmas)
 def gerar_texto_relatorio_diario(data_filtro):
     service = get_drive_service()
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -178,15 +198,37 @@ async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> Non
     await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=texto_relatorio, parse_mode='Markdown')
 
 
-# --- DEFINIÇÃO DOS COMANDOS ---
-
-# ----- FUNÇÃO ATUALIZADA PARA O TESTE DEFINITIVO -----
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_name = update.effective_user.first_name
-    await update.message.reply_text(
-        f"Olá, {user_name}! Se você está vendo esta mensagem, a ATUALIZAÇÃO v13 FUNCIONOU! ✅\n\n"
-        "Agora, por favor, teste o comando /debugvars"
+    help_text = (
+        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão de vendas.\n\n"
+        "Aqui está a lista de todos os comandos disponíveis:\n\n"
+        "**GESTÃO DIÁRIA**\n"
+        "*/estoque [sabor] [qtd]...*\n"
+        "Define o estoque inicial do dia. _Ex: /estoque carne 20 frango 15_\n\n"
+        "*/venda [sabor] [qtd]*\n"
+        "Registra uma venda e dá baixa no estoque. _Ex: /venda carne 2_\n\n"
+        "*/consumo [sabor] [qtd]*\n"
+        "Registra um consumo pessoal (custo). _Ex: /consumo frango 1_\n\n"
+        "*/ver_estoque*\n"
+        "Mostra uma consulta rápida do estoque atual.\n\n"
+        "**RELATÓRIOS E ANÁLISE**\n"
+        "*/diario*\n"
+        "Gera o relatório completo de hoje (vendas, estoque, resultado).\n\n"
+        "*/diario AAAA-MM-DD*\n"
+        "Gera o relatório para uma data específica. _Ex: /diario 2025-09-22_\n\n"
+        "*/lucro [dias]*\n"
+        "Mostra o lucro acumulado nos últimos dias. _Ex: /lucro 7_\n\n"
+        "*/grafico [dias]*\n"
+        "Gera um gráfico de desempenho do lucro. _Ex: /grafico 7_\n\n"
+        "*/vendas*\n"
+        "Envia o arquivo `.csv` com o histórico completo de vendas.\n\n"
+        "**CONFIGURAÇÃO**\n"
+        "*/registrar*\n"
+        "Mostra seu ID de chat para ativar os relatórios automáticos.\n\n"
+        "*/debugvars* - _(Para diagnóstico de problemas)_"
     )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
 async def debug_vars(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -210,7 +252,6 @@ async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
-# ... (Todas as outras funções de comando permanecem aqui, sem alterações)
 async def definir_estoque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not context.args or len(context.args) % 2 != 0:
@@ -301,16 +342,9 @@ async def registrar_venda(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        if len(context.args) != 2:
-            await update.message.reply_text(
-                f"🐛 Erro de Depuração: Eu esperava 2 argumentos, mas recebi {len(context.args)}.")
-            return
+        if len(context.args) != 2: raise ValueError("Formato incorreto")
         sabor = context.args[0].lower()
-        try:
-            quantidade_consumo = int(context.args[1])
-        except ValueError:
-            await update.message.reply_text(f"🐛 Erro de Depuração: A quantidade '{context.args[1]}' não é um número.")
-            return
+        quantidade_consumo = int(context.args[1])
         if sabor not in SABORES_VALIDOS:
             await update.message.reply_text(f"❌ Sabor inválido: *{sabor}*.", parse_mode='Markdown')
             return
@@ -321,11 +355,11 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                                         ['data', 'sabor', 'quantidade_inicial'])
         estoque_hoje = df_estoque[df_estoque['data'].dt.date == hoje]
         if estoque_hoje.empty:
-            await update.message.reply_text("⚠️ Atenção! Estoque de hoje não definido. Use `/estoque`.")
+            await update.message.reply_text("⚠️ Estoque de hoje não definido. Use `/estoque`.")
             return
         estoque_sabor = estoque_hoje[estoque_hoje['sabor'] == sabor]
         if estoque_sabor.empty:
-            await update.message.reply_text(f"⚠️ Atenção! Não há estoque inicial para '{sabor.capitalize()}' hoje.")
+            await update.message.reply_text(f"⚠️ Não há estoque inicial para '{sabor.capitalize()}' hoje.")
             return
         estoque_inicial = estoque_sabor['quantidade_inicial'].iloc[0]
         vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
@@ -341,8 +375,7 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ja_consumido = consumo_hoje_sabor['quantidade'].sum()
         estoque_atual = estoque_inicial - ja_vendido - ja_consumido
         if quantidade_consumo > estoque_atual:
-            await update.message.reply_text(f"❌ Consumo não registrado! Estoque insuficiente: *{int(estoque_atual)}*.",
-                                            parse_mode='Markdown')
+            await update.message.reply_text(f"❌ Estoque insuficiente: *{int(estoque_atual)}*.", parse_mode='Markdown')
             return
         novo_consumo = pd.DataFrame(
             [{'data_hora': pd.to_datetime('now', utc=True), 'sabor': sabor, 'quantidade': quantidade_consumo,
@@ -350,12 +383,13 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         df_consumo = pd.concat([df_consumo, novo_consumo], ignore_index=True)
         upload_dataframe(service, df_consumo, DRIVE_CONSUMO_FILE, consumo_fid, DRIVE_FOLDER_ID)
         await update.message.reply_text(
-            f'✅ Consumo pessoal registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
+            f'✅ Consumo registrado! Estoque restante de {sabor.capitalize()}: {int(estoque_atual - quantidade_consumo)}')
+    except (ValueError, IndexError):
+        await update.message.reply_text('❌ *Erro!* Formato: `/consumo [sabor] [quantidade]`', parse_mode='Markdown')
     except Exception as e:
         print(
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
-        await update.message.reply_text(
-            f"🐛 Ocorreu um erro inesperado no servidor. Por favor, mostre esta mensagem ao desenvolvedor:\n\n`Tipo do Erro: {type(e).__name__}`\n`Detalhes: {e}`")
+        await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
 
 
 async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -535,7 +569,7 @@ def main() -> None:
     application.add_handler(CommandHandler("grafico", gerar_grafico))
     application.add_handler(CommandHandler("debugvars", debug_vars))
 
-    print("Bot Final (v13 - Teste de Deploy) iniciado...")
+    print("Bot Final (v13) iniciado...")
     application.run_polling()
 
 
