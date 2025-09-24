@@ -29,61 +29,55 @@ DRIVE_FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "")
 DRIVE_VENDAS_FILE = "vendas_pasteis.csv"
 DRIVE_ESTOQUE_FILE = "estoque_diario.csv"
 DRIVE_CONSUMO_FILE = "consumo_pessoal.csv"
-DRIVE_RELATORIOS_FILE = "relatorios_fechamento.txt"
+DRIVE_FECHAMENTOS_FILE = "historico_fechamentos.csv"
 PRECO_FIXO_VENDA = 10.00
 PRECO_FIXO_CUSTO = 4.50
 SABORES_VALIDOS = ['carne', 'frango']
 TIMEZONE = 'America/Sao_Paulo'
 
 plt.switch_backend('Agg')
-
-# --- ESTADOS DA CONVERSA ---
 ASK_CARRYOVER = range(1)
 
 # --- FUNÇÕES DO GOOGLE DRIVE ---
+# ... (código do get_drive_service, get_file_id, download_dataframe, upload_dataframe sem alterações)
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
 
 def get_drive_service():
-    creds = None
-    # No servidor, sempre tentamos carregar as credenciais a partir das variáveis de ambiente
-    if 'GOOGLE_TOKEN_BASE_64' in os.environ and 'GOOGLE_CREDENTIALS_JSON' in os.environ:
-        try:
-            google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
-            decoded_token = base64.b64decode(google_token_base_64)
-            creds = pickle.loads(decoded_token)
-
-            if not creds.valid and creds.refresh_token:
-                print("Token do Google expirado. Tentando renovar...")
-                creds.refresh(Request())
-                print("Token renovado com sucesso.")
-        except Exception as e:
-            print(f"Erro ao processar credenciais do Google a partir das variáveis de ambiente: {e}")
-            raise ValueError(f"Erro ao processar credenciais: {e}")
-
-    # Fallback para execução local (usando arquivos)
-    elif os.path.exists('token.pickle'):
+    creds = None;
+    if os.path.exists('token.pickle'):
         with open('token.pickle', 'rb') as token:
             creds = pickle.load(token)
+    if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
-
-    elif os.path.exists('credentials.json'):
-        flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
-        creds = flow.run_local_server(port=0)
+        else:
+            if os.path.exists('credentials.json'):
+                flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                creds = flow.run_local_server(port=0)
+            else:
+                google_token_base_64 = os.environ.get('GOOGLE_TOKEN_BASE_64')
+                google_creds_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+                if google_token_base_64 and google_creds_json:
+                    try:
+                        decoded_token = base64.b64decode(google_token_base_64)
+                        creds = pickle.loads(decoded_token)
+                        if not creds.valid and creds.refresh_token:
+                            print("Token do Google expirado. Tentando renovar...")
+                            creds.refresh(Request())
+                            print("Token renovado com sucesso.")
+                    except Exception as e:
+                        print(f"Erro ao processar credenciais do Google: {e}")
+                        raise ValueError(f"Erro ao processar credenciais: {e}")
+                else:
+                    raise ValueError("Token ou credenciais não encontrados.")
         with open('token.pickle', 'wb') as token:
             pickle.dump(creds, token)
-
-    else:
-        raise ValueError("Nenhuma credencial válida encontrada (variáveis de ambiente ou arquivos locais).")
-
     return build('drive', 'v3', credentials=creds)
 
 
 def get_file_id(service, file_name, folder_id):
-    query = f"name='{file_name}' and trashed=false"
+    query = f"name='{file_name}' and trashed=false";
     if folder_id: query += f" and '{folder_id}' in parents"
     response = service.files().list(q=query, spaces='drive', fields='files(id, name)').execute()
     files = response.get('files', [])
@@ -132,104 +126,201 @@ def upload_dataframe(service, df, file_name, file_id, folder_id):
         service.files().create(body=file_metadata, media_body=media, fields='id').execute()
 
 
-def append_text_to_drive_file(service, content_to_append, file_name, file_id, folder_id):
-    """Função para adicionar texto a um arquivo no Drive."""
-    request = service.files().get_media(fileId=file_id) if file_id else None
-    fh = io.BytesIO()
-    if request:
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while not done:
-            status, done = downloader.next_chunk()
-
-    old_content = fh.getvalue().decode('utf-8')
-    new_content = old_content + content_to_append
-
-    fh_upload = io.BytesIO(new_content.encode('utf-8'))
-    media = MediaIoBaseUpload(fh_upload, mimetype='text/plain', resumable=True)
-    file_metadata = {'name': file_name}
-    if file_id:
-        service.files().update(fileId=file_id, media_body=media).execute()
-    else:
-        if folder_id: file_metadata['parents'] = [folder_id]
-        service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-
-
-# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL ---
-def gerar_texto_relatorio_diario(data_filtro):
-    # (Esta função permanece a mesma da versão anterior)
+# --- LÓGICA DE RELATÓRIO REUTILIZÁVEL (REFATORADA) ---
+def gerar_dados_relatorio_diario(data_filtro):
     service = get_drive_service()
+
+    # Busca de dados
     vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
     df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid,
                                    ['data_hora', 'sabor', 'quantidade', 'preco_unidade', 'custo_unidade', 'total_venda',
                                     'lucro_venda'])
     df_vendas_dia = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == data_filtro]
+
     estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
     df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid, ['data', 'sabor', 'quantidade_inicial'])
     df_estoque_dia = df_estoque[df_estoque['data'].dt.date == data_filtro]
+
     consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-    colunas_consumo = ['data_hora', 'sabor', 'quantidade', 'custo_total']
-    df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid, colunas_consumo)
+    df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
+                                    ['data_hora', 'sabor', 'quantidade', 'custo_total'])
     df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == data_filtro]
-    titulo_relatorio = f"📊 *Dashboard do Dia {data_filtro.strftime('%d/%m/%Y')}*"
-    relatorio_texto = f"{titulo_relatorio}\n\n*Resumo Financeiro (das Vendas)*\n"
-    faturamento_bruto = 0
-    lucro_liquido_margem = 0
-    if not df_vendas_dia.empty:
-        faturamento_bruto = df_vendas_dia['total_venda'].sum()
-        lucro_liquido_margem = df_vendas_dia['lucro_venda'].sum()
-        relatorio_texto += (f"  - Pastéis Vendidos: *{int(df_vendas_dia['quantidade'].sum())}*\n"
-                            f"  - Faturamento Bruto: *R$ {faturamento_bruto:.2f}*\n"
-                            f"  - Lucro (Margem): *R$ {lucro_liquido_margem:.2f}*")
-    else:
-        relatorio_texto += "_Nenhuma venda registrada neste dia._"
-    relatorio_texto += "\n\n*Gestão de Estoque*\n"
+
+    # Cálculos Financeiros
+    faturamento_bruto = df_vendas_dia['total_venda'].sum()
+    lucro_margem = df_vendas_dia['lucro_venda'].sum()
+    pasteis_vendidos = df_vendas_dia['quantidade'].sum()
+
+    # Cálculos de Estoque e Resultado Final
+    custo_inicial_total = 0
+    custo_consumo_pessoal = 0
+    resultado_do_dia = lucro_margem
+    sobras_dict = {sabor: 0 for sabor in SABORES_VALIDOS}
+
     if not df_estoque_dia.empty:
-        for index, row in df_estoque_dia.iterrows():
-            sabor = row['sabor']
-            inicial = row['quantidade_inicial']
+        custo_inicial_total = df_estoque_dia['quantidade_inicial'].sum() * PRECO_FIXO_CUSTO
+        custo_consumo_pessoal = df_consumo_dia['custo_total'].sum()
+        resultado_do_dia = lucro_margem - custo_consumo_pessoal
+
+        for sabor in SABORES_VALIDOS:
+            inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
             vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
             consumido = df_consumo_dia[df_consumo_dia['sabor'] == sabor]['quantidade'].sum()
             sobra = inicial - vendido - consumido
-            relatorio_texto += (
-                f"  - `{sabor.capitalize()}`: Começou com {int(inicial)}, vendeu {int(vendido)}, consumiu {int(consumido)}, sobrou *{int(sobra)}*\n")
-        relatorio_texto += "\n---\n\n*Resultado Final do Dia*\n"
-        custo_inicial_total = df_estoque_dia['quantidade_inicial'].sum() * PRECO_FIXO_CUSTO
-        custo_consumo_pessoal = df_consumo_dia['custo_total'].sum()
-        resultado_do_dia = lucro_liquido_margem - custo_consumo_pessoal
-        relatorio_texto += f"  - Investimento em Estoque: *R$ {custo_inicial_total:.2f}*\n"
-        relatorio_texto += f"  - Faturamento das Vendas: *R$ {faturamento_bruto:.2f}*\n"
-        relatorio_texto += f"  - Custo do Consumo Pessoal: *R$ {custo_consumo_pessoal:.2f}*\n"
-        if resultado_do_dia >= 0:
-            relatorio_texto += f"  - Resultado: *🚀 Lucro de R$ {resultado_do_dia:.2f}*"
-        else:
-            relatorio_texto += f"  - Resultado: *📉 Prejuízo de R$ {-resultado_do_dia:.2f}*"
+            sobras_dict[sabor] = sobra
+
+    # Montagem do Novo Dashboard
+    titulo = f"📊 *Fechamento do Dia: {data_filtro.strftime('%d/%m/%Y')}*"
+
+    resumo_financeiro = (f"💰 *RESUMO FINANCEIRO*\n"
+                         f"  - Faturamento Bruto: *R$ {faturamento_bruto:.2f}*\n"
+                         f"  - Lucro (Margem das Vendas): *R$ {lucro_margem:.2f}*")
+
+    gestao_estoque = "📦 *GESTÃO DE ESTOQUE*\n"
+    if not df_estoque_dia.empty:
+        for sabor in SABORES_VALIDOS:
+            inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
+            vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
+            consumido = df_consumo_dia[df_consumo_dia['sabor'] == sabor]['quantidade'].sum()
+            sobra = sobras_dict[sabor]
+            gestao_estoque += f"  - `{sabor.capitalize()}`: Ini: {int(inicial)}, Ven: {int(vendido)}, Con: {int(consumido)} ➜ Sobra: *{int(sobra)}*\n"
     else:
-        relatorio_texto += "_Nenhum estoque inicial definido para este dia._"
-    return relatorio_texto
+        gestao_estoque += "_Nenhum estoque inicial definido._"
 
+    resultado_final = "🎯 *RESULTADO FINAL DO DIA*\n"
+    if not df_estoque_dia.empty:
+        resultado_final += f"  - Lucro das Vendas: `R$ {lucro_margem:.2f}`\n"
+        resultado_final += f"  - Custo do Consumo: `R$ -{custo_consumo_pessoal:.2f}`\n"
+        resultado_final += "  --------------------------------\n"
+        if resultado_do_dia >= 0:
+            resultado_final += f"  - Resultado: *🚀 Lucro de R$ {resultado_do_dia:.2f}*"
+        else:
+            resultado_final += f"  - Resultado: *📉 Prejuízo de R$ {-resultado_do_dia:.2f}*"
+    else:
+        resultado_final += "_Impossível calcular sem o estoque inicial._"
 
-async def enviar_relatorio_automatico(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not TELEGRAM_CHAT_ID:
-        print("TELEGRAM_CHAT_ID não definido. Relatório automático cancelado.")
-        return
-    print(f"Executando relatório automático para o chat {TELEGRAM_CHAT_ID}...")
-    data_hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-    texto_relatorio = gerar_texto_relatorio_diario(data_hoje)
-    await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=texto_relatorio, parse_mode='Markdown')
+    texto_final = f"{titulo}\n\n{resumo_financeiro}\n\n{gestao_estoque}\n\n{resultado_final}"
+
+    return {
+        "texto": texto_final,
+        "data": data_filtro.strftime('%Y-%m-%d'),
+        "pasteis_vendidos": int(pasteis_vendidos),
+        "faturamento_bruto": faturamento_bruto,
+        "lucro_margem": lucro_margem,
+        "custo_investimento": custo_inicial_total,
+        "custo_consumo": custo_consumo_pessoal,
+        "resultado_final": resultado_do_dia,
+        "sobras": json.dumps(sobras_dict)
+    }
 
 
 # --- DEFINIÇÃO DOS COMANDOS ---
+async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
+
+        dados_relatorio = gerar_dados_relatorio_diario(hoje)
+        context.user_data['dados_fechamento'] = dados_relatorio
+
+        await update.message.reply_text(dados_relatorio['texto'], parse_mode='Markdown')
+
+        sobras = json.loads(dados_relatorio['sobras'])
+
+        if any(v > 0 for v in sobras.values()):
+            sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items() if q > 0])
+            keyboard = [[InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
+                         InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
+                reply_markup=reply_markup
+            )
+            return ASK_CARRYOVER
+        else:
+            await update.message.reply_text("Nenhuma sobra de estoque encontrada. Salvando relatório...")
+            service = get_drive_service()
+            fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
+            colunas_fechamento = list(dados_relatorio.keys())[1:]
+            df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
+
+            novo_fechamento_df = pd.DataFrame([dados_relatorio])
+            novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
+
+            df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
+            upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
+            await update.message.reply_text("✅ Fechamento concluído e salvo no histórico CSV!")
+            return ConversationHandler.END
+
+    except Exception as e:
+        await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
+        return ConversationHandler.END
+
+
+async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+    dados_fechamento = context.user_data.get('dados_fechamento', {})
+
+    if not dados_fechamento:
+        await query.edit_message_text(text="Erro: dados do fechamento não encontrados. Tente novamente.")
+        return ConversationHandler.END
+
+    sobras = json.loads(dados_fechamento.get('sobras', '{}'))
+    service = get_drive_service()
+
+    # Salva o fechamento no CSV
+    fechamentos_fid = get_file_id(service, DRIVE_FECHAMENTOS_FILE, DRIVE_FOLDER_ID)
+    colunas_fechamento = list(dados_fechamento.keys())[1:]
+    df_fechamentos = download_dataframe(service, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, colunas_fechamento)
+
+    novo_fechamento_df = pd.DataFrame([dados_fechamento])
+    novo_fechamento_df = novo_fechamento_df.drop(columns=['texto'])
+
+    df_fechamentos['data'] = pd.to_datetime(df_fechamentos['data']).dt.strftime('%Y-%m-%d')
+    df_fechamentos = df_fechamentos[~(df_fechamentos['data'] == dados_fechamento['data'])]
+    df_fechamentos = pd.concat([df_fechamentos, novo_fechamento_df], ignore_index=True)
+
+    upload_dataframe(service, df_fechamentos, DRIVE_FECHAMENTOS_FILE, fechamentos_fid, DRIVE_FOLDER_ID)
+
+    if choice == "carryover_yes" and sobras:
+        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
+        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
+        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
+        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
+                                        ['data', 'sabor', 'quantidade_inicial'])
+        df_estoque['data'] = pd.to_datetime(df_estoque['data']).dt.strftime('%Y-%m-%d')
+
+        for sabor, quantidade in sobras.items():
+            if quantidade > 0:
+                df_estoque = df_estoque[~((df_estoque['data'] == amanha_str) & (df_estoque['sabor'] == sabor))]
+                novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
+                df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
+
+        upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo em CSV e as sobras foram lançadas para amanhã.")
+    else:
+        await query.edit_message_text(
+            text="✅ Fechamento concluído! O relatório foi salvo em CSV e as sobras foram descartadas.")
+
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+# ... (outras funções de comando como start, registrar_venda, etc., permanecem aqui)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # (código do start)
     user_name = update.effective_user.first_name
     help_text = (
-        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão v10!\n\n"
+        f"Olá, {user_name}! Bem-vindo ao seu assistente de gestão v11!\n\n"
         "**COMANDO DE FIM DE EXPEDIENTE**\n"
         "*/fechamento*\n"
-        "_Gera o relatório final, salva o histórico e pergunta se deseja virar o estoque para o dia seguinte._\n\n"
+        "_Gera o relatório final, salva em CSV e pergunta sobre as sobras._\n\n"
         "**GESTÃO DIÁRIA**\n"
         "*/estoque [sabor] [qtd]...*\n"
-        "Define (ou adiciona a) o estoque inicial do dia.\n"
+        "Define o estoque inicial do dia.\n"
         "*/venda [sabor] [qtd]*\n"
         "Registra uma venda.\n"
         "*/consumo [sabor] [qtd]*\n"
@@ -252,102 +343,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 
-async def fechamento_diario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-        await update.message.reply_text(f"🔒 Iniciando fechamento do dia {hoje.strftime('%d/%m/%Y')}...")
-
-        relatorio_final = gerar_texto_relatorio_diario(hoje)
-        await update.message.reply_text(relatorio_final, parse_mode='Markdown')
-
-        service = get_drive_service()
-
-        # Salva o relatório no arquivo de histórico
-        relatorios_fid = get_file_id(service, DRIVE_RELATORIOS_FILE, DRIVE_FOLDER_ID)
-        texto_para_salvar = "\n\n" + (
-                    "=" * 30) + f"\n\nFECHAMENTO DE {hoje.strftime('%d/%m/%Y')}\n\n" + relatorio_final.replace('*', '')
-        append_text_to_drive_file(service, texto_para_salvar, DRIVE_RELATORIOS_FILE, relatorios_fid, DRIVE_FOLDER_ID)
-
-        # Calcula sobras
-        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
-        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
-                                        ['data', 'sabor', 'quantidade_inicial'])
-        df_estoque_dia = df_estoque[df_estoque['data'].dt.date == hoje]
-
-        sobras = {}
-        if not df_estoque_dia.empty:
-            vendas_fid = get_file_id(service, DRIVE_VENDAS_FILE, DRIVE_FOLDER_ID)
-            df_vendas = download_dataframe(service, DRIVE_VENDAS_FILE, vendas_fid, ['data_hora', 'sabor', 'quantidade'])
-            df_vendas_dia = df_vendas[df_vendas['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
-            consumo_fid = get_file_id(service, DRIVE_CONSUMO_FILE, DRIVE_FOLDER_ID)
-            df_consumo = download_dataframe(service, DRIVE_CONSUMO_FILE, consumo_fid,
-                                            ['data_hora', 'sabor', 'quantidade'])
-            df_consumo_dia = df_consumo[df_consumo['data_hora'].dt.tz_convert(TIMEZONE).dt.date == hoje]
-            for sabor in SABORES_VALIDOS:
-                inicial = df_estoque_dia[df_estoque_dia['sabor'] == sabor]['quantidade_inicial'].sum()
-                vendido = df_vendas_dia[df_vendas_dia['sabor'] == sabor]['quantidade'].sum()
-                consumido = df_consumo_dia[df_consumo_dia['sabor'] == sabor]['quantidade'].sum()
-                sobra = inicial - vendido - consumido
-                if sobra > 0:
-                    sobras[sabor] = sobra
-
-        if sobras:
-            context.user_data['sobras'] = sobras
-            sobras_texto = "\n".join([f"  - {s.capitalize()}: {int(q)}" for s, q in sobras.items()])
-            keyboard = [[InlineKeyboardButton("✅ Sim, lançar", callback_data="carryover_yes"),
-                         InlineKeyboardButton("❌ Não, descartar", callback_data="carryover_no")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await update.message.reply_text(
-                f"Foram encontradas as seguintes sobras:\n{sobras_texto}\n\nDeseja lançá-las como estoque inicial para amanhã?",
-                reply_markup=reply_markup)
-            return ASK_CARRYOVER
+        if context.args:
+            data_filtro = pd.to_datetime(context.args[0]).date()
         else:
-            await update.message.reply_text("Nenhuma sobra de estoque encontrada. Fechamento concluído!")
-            return ConversationHandler.END
+            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
 
+        dados = gerar_dados_relatorio_diario(data_filtro)
+        await update.message.reply_text(dados['texto'], parse_mode='Markdown')
     except Exception as e:
-        await update.message.reply_text(f"🐛 Erro ao iniciar fechamento: {e}")
-        return ConversationHandler.END
+        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
-async def handle_carryover_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    sobras = context.user_data.get('sobras', {})
-
-    if choice == "carryover_yes" and sobras:
-        service = get_drive_service()
-        hoje = pd.Timestamp.now(tz=TIMEZONE).date()
-        amanha_str = (hoje + timedelta(days=1)).strftime('%Y-%m-%d')
-        estoque_fid = get_file_id(service, DRIVE_ESTOQUE_FILE, DRIVE_FOLDER_ID)
-        df_estoque = download_dataframe(service, DRIVE_ESTOQUE_FILE, estoque_fid,
-                                        ['data', 'sabor', 'quantidade_inicial'])
-
-        for sabor, quantidade in sobras.items():
-            df_estoque = df_estoque[
-                ~((df_estoque['data'].dt.strftime('%Y-%m-%d') == amanha_str) & (df_estoque['sabor'] == sabor))]
-            novo_estoque = pd.DataFrame([{'data': amanha_str, 'sabor': sabor, 'quantidade_inicial': quantidade}])
-            df_estoque = pd.concat([df_estoque, novo_estoque], ignore_index=True)
-
-        upload_dataframe(service, df_estoque, DRIVE_ESTOQUE_FILE, estoque_fid, DRIVE_FOLDER_ID)
-        await query.edit_message_text(
-            text="✅ Fechamento concluído! O relatório foi salvo e as sobras foram lançadas como estoque inicial para amanhã.")
-    else:
-        await query.edit_message_text(
-            text="✅ Fechamento concluído! O relatório foi salvo e as sobras foram descartadas.")
-
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Operação de fechamento cancelada.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-
-# ... (outras funções de comando como registrar_usuario, definir_estoque, etc. continuam aqui)
+# (todas as outras funções de comando permanecem aqui)
 async def registrar_usuario(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     await update.message.reply_text(
@@ -495,18 +504,6 @@ async def consumo_pessoal(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         print(
             f"--- ERRO INESPERADO EM consumo_pessoal ---\n{traceback.format_exc()}\n----------------------------------------")
         await update.message.reply_text(f"🐛 Erro inesperado no servidor: `{e}`")
-
-
-async def relatorio_diario_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        if context.args:
-            data_filtro = pd.to_datetime(context.args[0]).date()
-        else:
-            data_filtro = pd.Timestamp.now(tz=TIMEZONE).date()
-        texto = gerar_texto_relatorio_diario(data_filtro)
-        await update.message.reply_text(texto, parse_mode='Markdown')
-    except Exception as e:
-        await update.message.reply_text(f"🐛 Erro ao gerar relatório: {e}")
 
 
 async def ver_estoque_atual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -662,7 +659,6 @@ def main() -> None:
 
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
-    # Configura o ConversationHandler para o fechamento
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("fechamento", fechamento_diario)],
         states={
@@ -672,7 +668,6 @@ def main() -> None:
     )
     application.add_handler(conv_handler)
 
-    # Adiciona os outros comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("registrar", registrar_usuario))
     application.add_handler(CommandHandler("estoque", definir_estoque))
@@ -684,7 +679,7 @@ def main() -> None:
     application.add_handler(CommandHandler("ver_estoque", ver_estoque_atual))
     application.add_handler(CommandHandler("grafico", gerar_grafico))
 
-    print("Bot com Fechamento Interativo (v10) iniciado...")
+    print("Bot com Fechamento em CSV (v11) iniciado...")
     application.run_polling()
 
 
